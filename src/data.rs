@@ -90,6 +90,20 @@ pub struct Trip {
     pub service_idx: u32,
     pub headsign: String,
     pub direction_id: u8,
+    // frequency rules: if non-empty, this is a frequency-based template trip
+    pub frequency_rules: Vec<FrequencyRule>,
+    // first departure time of the template stop_times (seconds since midnight)
+    pub template_first_departure: u32,
+}
+
+// a single frequency rule: the trip repeats at headway_secs intervals
+// between start_time and end_time
+#[derive(Debug, Clone, Copy)]
+pub struct FrequencyRule {
+    pub start_time: u32,
+    pub end_time: u32,
+    pub headway_secs: u32,
+    pub exact_times: bool,
 }
 
 #[derive(Debug, Clone, Copy)]

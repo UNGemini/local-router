@@ -90,6 +90,20 @@ struct Trip {
   serviceIdx @2 :UInt32;  # index into services list
   headsign @3 :Text;
   directionId @4 :UInt8;
+  # frequency rules: if non-empty, this is a frequency-based template trip.
+  # stop times are stored as absolute times for the template departure.
+  # raptor computes the next real departure from these rules.
+  frequencyRules @5 :List(FrequencyRule);
+  # first departure time (seconds since midnight) of the template stop_times.
+  # used to compute offsets when applying frequency rules.
+  templateFirstDeparture @6 :UInt32;
+}
+
+struct FrequencyRule {
+  startTime @0 :UInt32;  # seconds since midnight
+  endTime @1 :UInt32;
+  headwaySecs @2 :UInt32;
+  exactTimes @3 :Bool;
 }
 
 struct Transfer {

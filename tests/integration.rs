@@ -31,7 +31,7 @@ fn test_sf_embarcadero_to_civic() {
         "walking_speed": "normal",
         "max_results": 5
     });
-    let result = router.plan(&request.to_string()).unwrap();
+    let result = router.plan_json(&request.to_string()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let plans = parsed["plans"].as_array().unwrap();
     println!("sf embarcadero->civic: {} plans", plans.len());
@@ -130,7 +130,7 @@ fn test_sf_walk_paths_complete() {
             "depart_at": "2026-03-09T09:00:00Z",
             "max_results": 5
         });
-        let result = router.plan(&request.to_string()).unwrap();
+        let result = router.plan_json(&request.to_string()).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
         let plans = parsed["plans"].as_array().unwrap();
         println!("query {}: {} plans", oi, plans.len());
@@ -211,15 +211,20 @@ fn test_sf_walk_paths_complete() {
 fn test_load_data() {
     let router = load_test_router();
     let stats = router.stats();
-    println!("stats: {}", stats);
-    // should have stops, routes, trips
-    assert!(stats.contains("\"stops\""));
-    assert!(stats.contains("\"routes\""));
-    let parsed: serde_json::Value = serde_json::from_str(&stats).unwrap();
-    let n_stops = parsed["stops"].as_u64().unwrap();
-    let n_routes = parsed["routes"].as_u64().unwrap();
-    assert!(n_stops > 100, "expected >100 stops, got {}", n_stops);
-    assert!(n_routes > 10, "expected >10 routes, got {}", n_routes);
+    println!(
+        "stats: stops={} routes={} trips={} services={}",
+        stats.stops, stats.routes, stats.trips, stats.services
+    );
+    assert!(
+        stats.stops > 100,
+        "expected >100 stops, got {}",
+        stats.stops
+    );
+    assert!(
+        stats.routes > 10,
+        "expected >10 routes, got {}",
+        stats.routes
+    );
 }
 
 #[test]
@@ -233,7 +238,7 @@ fn test_plan_weekday_morning() {
         "depart_at": "2026-03-09T08:00:00Z",
         "max_results": 5
     });
-    let result = router.plan(&request.to_string());
+    let result = router.plan_json(&request.to_string());
     match result {
         Ok(json) => {
             println!("plan result: {}", &json[..json.len().min(2000)]);
@@ -295,7 +300,7 @@ fn test_plan_no_results_far_away() {
         "destination": "35.681236,139.767125",
         "depart_at": "2026-03-09T08:00:00Z"
     });
-    let result = router.plan(&request.to_string()).unwrap();
+    let result = router.plan_json(&request.to_string()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let plans = parsed["plans"].as_array().unwrap();
     assert!(
@@ -314,7 +319,7 @@ fn test_plan_nearby_stops() {
         "depart_at": "2026-03-09T09:00:00Z",
         "max_results": 3
     });
-    let result = router.plan(&request.to_string()).unwrap();
+    let result = router.plan_json(&request.to_string()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     let plans = parsed["plans"].as_array().unwrap();
     println!("nearby stops: {} plans found", plans.len());
@@ -323,5 +328,106 @@ fn test_plan_nearby_stops() {
         let dur = plan["duration_seconds"].as_u64().unwrap();
         let legs = plan["legs"].as_array().unwrap();
         println!("  plan {}: {}s, {} legs", i, dur, legs.len());
+    }
+}
+
+#[test]
+fn test_sf_egress_stop_mismatch() {
+    let router = match load_sf_router() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipping: sf data not found");
+            return;
+        }
+    };
+    // bug report: egress walk starts from wrong stop
+    // 37.790435,-122.392502 to 37.790435,-122.429237 at 11:07pm
+    let request = serde_json::json!({
+        "origin": "37.790435,-122.392502",
+        "destination": "37.790435,-122.429237",
+        "depart_at": "2026-03-09T23:07:00Z",
+        "max_results": 5
+    });
+    let result = router.plan_json(&request.to_string()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let plans = parsed["plans"].as_array().unwrap();
+
+    for (i, plan) in plans.iter().enumerate() {
+        let dur = plan["duration_seconds"].as_u64().unwrap();
+        println!("=== Plan {} ({}s = {} min) ===", i, dur, dur / 60);
+        let legs = plan["legs"].as_array().unwrap();
+        for (j, leg) in legs.iter().enumerate() {
+            if let Some(wt) = leg.get("walk_type") {
+                let from = leg
+                    .get("from")
+                    .and_then(|f| f.get("address"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("?");
+                let to = leg
+                    .get("to")
+                    .and_then(|t| t.get("address"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("?");
+                let dist = leg
+                    .get("distance_meters")
+                    .and_then(|d| d.as_u64())
+                    .unwrap_or(0);
+                let secs = leg
+                    .get("duration_seconds")
+                    .and_then(|d| d.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "  Leg {} [{}]: {} -> {} ({}m, {}s)",
+                    j,
+                    wt.as_str().unwrap_or("?"),
+                    from,
+                    to,
+                    dist,
+                    secs
+                );
+            } else if let Some(ro) = leg.get("route_options") {
+                let opts = ro.as_array().unwrap();
+                let name = opts[0]["route_name"].as_str().unwrap_or("?");
+                let mode = opts[0]["mode"].as_str().unwrap_or("?");
+                let from_name = opts[0]["from"]["stop_name"].as_str().unwrap_or("?");
+                let to_name = opts[0]["to"]["stop_name"].as_str().unwrap_or("?");
+                println!(
+                    "  Leg {} [transit {} {}]: {} -> {}",
+                    j, mode, name, from_name, to_name
+                );
+            }
+        }
+
+        // verify: for each transit leg followed by an egress walk, the transit
+        // leg's "to" stop should match the next walk's "from" stop (or there
+        // should be a transfer walk in between)
+        for j in 0..legs.len() - 1 {
+            let this_leg = &legs[j];
+            let next_leg = &legs[j + 1];
+            if let (Some(ro), Some(next_wt)) =
+                (this_leg.get("route_options"), next_leg.get("walk_type"))
+            {
+                let next_wt_str = next_wt.as_str().unwrap_or("");
+                if next_wt_str == "station_egress" {
+                    let transit_to = ro.as_array().unwrap()[0]["to"]["stop_name"]
+                        .as_str()
+                        .unwrap_or("?");
+                    let egress_from = next_leg
+                        .get("from")
+                        .and_then(|f| f.get("address"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("?");
+                    println!(
+                        "  CHECK: transit alights at '{}', egress starts from '{}'",
+                        transit_to, egress_from
+                    );
+                    assert_eq!(
+                        transit_to, egress_from,
+                        "plan {}: egress walk starts from '{}' but bus alights at '{}'",
+                        i, egress_from, transit_to
+                    );
+                }
+            }
+        }
     }
 }

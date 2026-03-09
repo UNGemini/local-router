@@ -7,8 +7,8 @@ use crate::raptor::{self, RaptorJourney, RaptorQuery};
 use crate::types::*;
 use crate::walker;
 
-const DEFAULT_MAX_WALK: u32 = 1000; // meters for access/egress
-const DEFAULT_MAX_WALK_ONLY: u32 = 5000; // meters for walk-only trips
+const DEFAULT_MAX_WALK: u32 = 1600; // meters for access/egress
+const DEFAULT_MAX_WALK_ONLY: u32 = 4000; // meters for walk-only trips
 const DEFAULT_MAX_TRANSFERS: u32 = 3;
 const DEFAULT_MAX_RESULTS: usize = 15;
 const RANGE_WINDOW_SECS: u32 = 3600; // search up to 60 min after requested departure
@@ -329,8 +329,12 @@ fn journey_to_plan(
         for pos in rleg.board_stop_pos..=rleg.alight_stop_pos {
             let sidx = route.stop_idxs[pos as usize];
             let s = &data.stops[sidx as usize];
-            let arr = route.arrival_at(&data.arrivals, rleg.trip_num, pos as usize);
-            let dep = route.departure_at(&data.departures, rleg.trip_num, pos as usize);
+            let arr = route
+                .arrival_at(&data.arrivals, rleg.trip_num, pos as usize)
+                .saturating_add(rleg.freq_delta);
+            let dep = route
+                .departure_at(&data.departures, rleg.trip_num, pos as usize)
+                .saturating_add(rleg.freq_delta);
 
             let board_dep = rleg.board_time;
             let arr_offset = if arr != NOT_SET && arr >= board_dep {
@@ -489,58 +493,103 @@ fn journey_to_plan(
         }));
     }
 
-    // egress walk leg (last alighting stop -> destination)
-    if journey.egress_walk_secs > 0 {
-        let stop = &data.stops[journey.egress_stop_idx as usize];
-        let egress_dist = dest_reach
-            .stops
-            .iter()
-            .find(|(s, _, _)| *s == journey.egress_stop_idx)
-            .map(|(_, _, d)| *d)
-            .unwrap_or(0);
+    // egress walk: always walk from the actual last alight stop to destination.
+    // raptor may have used a footpath transfer to reach a closer dest_stop, but
+    // the user physically gets off at the alight stop and walks to their destination.
+    if journey.egress_walk_secs > 0 || journey.egress_stop_idx != 0 {
+        // determine the actual stop where the passenger alights
+        let egress_from_idx = if let Some(last_leg) = journey.legs.last() {
+            let last_route = &data.routes[last_leg.route_idx as usize];
+            last_route.stop_idxs[last_leg.alight_stop_pos as usize]
+        } else {
+            journey.egress_stop_idx
+        };
+        let stop = &data.stops[egress_from_idx as usize];
 
-        // dest_reach runs dijkstra FROM destination, so the path is dest->stop.
-        // we need stop->dest, so reverse it.
-        let mut path_coords =
-            dest_reach.path_to_stop(&data.walk_graph, &data.stops, journey.egress_stop_idx);
-        path_coords.reverse();
-        // prepend stop coord, append dest coord
-        path_coords.insert(0, (stop.lat, stop.lon));
-        path_coords.push((req.dest_lat as f32, req.dest_lon as f32));
+        // compute walking from alight stop to destination via walk graph
+        let (egress_dist, egress_secs, path_coords) = {
+            // try dest_reach first if this stop is in dest_stops
+            let from_dest_reach = dest_reach
+                .stops
+                .iter()
+                .find(|(s, _, _)| *s == egress_from_idx);
+            if let Some(&(_, secs, dist)) = from_dest_reach {
+                let mut pc =
+                    dest_reach.path_to_stop(&data.walk_graph, &data.stops, egress_from_idx);
+                pc.reverse();
+                pc.insert(0, (stop.lat, stop.lon));
+                pc.push((req.dest_lat as f32, req.dest_lon as f32));
+                (dist, secs, pc)
+            } else {
+                // alight stop not in dest_reach (was reached via footpath transfer);
+                // compute direct walk from alight stop to destination
+                match walker::walk_between(
+                    &data.walk_graph,
+                    stop.lat,
+                    stop.lon,
+                    req.dest_lat as f32,
+                    req.dest_lon as f32,
+                    DEFAULT_MAX_WALK_ONLY,
+                    walk_speed,
+                ) {
+                    Some((dist, secs, path)) => (dist, secs, path),
+                    None => {
+                        // fallback: straight line
+                        let d = walker::haversine(
+                            stop.lat,
+                            stop.lon,
+                            req.dest_lat as f32,
+                            req.dest_lon as f32,
+                        ) as u32;
+                        let s = (d as f32 / walk_speed) as u32;
+                        (
+                            d,
+                            s,
+                            vec![
+                                (stop.lat, stop.lon),
+                                (req.dest_lat as f32, req.dest_lon as f32),
+                            ],
+                        )
+                    }
+                }
+            }
+        };
 
-        legs.push(Leg::Walk(WalkLeg {
-            walk_type: Some("station_egress".to_string()),
-            from: Some(Location {
-                location: LatLon {
-                    lat: stop.lat as f64,
-                    lon: stop.lon as f64,
-                },
-                address: Some(stop.name.clone()),
-                id: Some(stop.id.clone()),
-                stop_id: Some(stop.id.clone()),
-                entrance: None,
-                platform: if stop.platform_code.is_empty() {
-                    None
-                } else {
-                    Some(stop.platform_code.clone())
-                },
-            }),
-            to: Some(Location {
-                location: LatLon {
-                    lat: req.dest_lat,
-                    lon: req.dest_lon,
-                },
-                address: Some("END".to_string()),
-                id: None,
-                stop_id: None,
-                entrance: None,
-                platform: None,
-            }),
-            duration_seconds: journey.egress_walk_secs,
-            distance_meters: Some(egress_dist),
-            polyline: None,
-            path: coords_to_path(&path_coords),
-        }));
+        if egress_secs > 0 {
+            legs.push(Leg::Walk(WalkLeg {
+                walk_type: Some("station_egress".to_string()),
+                from: Some(Location {
+                    location: LatLon {
+                        lat: stop.lat as f64,
+                        lon: stop.lon as f64,
+                    },
+                    address: Some(stop.name.clone()),
+                    id: Some(stop.id.clone()),
+                    stop_id: Some(stop.id.clone()),
+                    entrance: None,
+                    platform: if stop.platform_code.is_empty() {
+                        None
+                    } else {
+                        Some(stop.platform_code.clone())
+                    },
+                }),
+                to: Some(Location {
+                    location: LatLon {
+                        lat: req.dest_lat,
+                        lon: req.dest_lon,
+                    },
+                    address: Some("END".to_string()),
+                    id: None,
+                    stop_id: None,
+                    entrance: None,
+                    platform: None,
+                }),
+                duration_seconds: egress_secs,
+                distance_meters: Some(egress_dist),
+                polyline: None,
+                path: coords_to_path(&path_coords),
+            }));
+        }
     }
 
     let total_duration = journey.arrival_time.saturating_sub(journey.departure_time);

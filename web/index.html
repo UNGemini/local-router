@@ -1,0 +1,1111 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Wheels Router Nano</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link
+            href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@300;400;500&display=swap"
+            rel="stylesheet"
+        />
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        />
+        <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+        <style>
+            :root {
+                --bg: #f5f5f7;
+                --surface: #ffffff;
+                --surface2: #f5f5f7;
+                --border: #e0e0e5;
+                --border2: #c8c8ce;
+                --text: #1a1a1e;
+                --text2: #6e6e78;
+                --text3: #9898a0;
+                --accent: #007aff;
+                --accent-dark: #0062cc;
+                --walk: #ff9500;
+                --walk-egress: #ff3b30;
+                --walk-transfer: #af52de;
+                --radius: 12px;
+                --radius-sm: 8px;
+                --mono: "Geist Mono", monospace;
+                --sans: "Geist", sans-serif;
+                --sidebar-w: 360px;
+                --header-h: 52px;
+            }
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            html, body {
+                height: 100%;
+                overflow: hidden;
+            }
+            body {
+                font-family: var(--sans);
+                background: var(--bg);
+                color: var(--text);
+                display: flex;
+                flex-direction: column;
+                -webkit-font-smoothing: antialiased;
+            }
+
+            /* header */
+            .header {
+                height: var(--header-h);
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                padding: 0 20px;
+                background: var(--surface);
+                border-bottom: 1px solid var(--border);
+                flex-shrink: 0;
+                z-index: 1000;
+            }
+            .header-logo {
+                height: 33px;
+                width: auto;
+                display: block;
+            }
+
+            /* city switcher */
+            .city-switcher {
+                display: flex;
+                align-items: center;
+                gap: 2px;
+                background: var(--surface2);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                padding: 3px;
+                position: relative;
+                flex-shrink: 0;
+                transition: box-shadow 0.2s;
+            }
+            .city-switcher.floating {
+                position: absolute;
+                top: 10px;
+                left: 10px;
+                z-index: 800;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+            }
+            .city-slider {
+                position: absolute;
+                top: 3px;
+                left: 3px;
+                height: calc(100% - 6px);
+                border-radius: 6px;
+                background: var(--surface);
+                box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+                transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+                            width 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+                pointer-events: none;
+                z-index: 0;
+            }
+            .city-btn {
+                padding: 4px 12px;
+                border: none;
+                background: transparent;
+                border-radius: 6px;
+                font-family: var(--mono);
+                font-size: 11.5px;
+                font-weight: 500;
+                color: var(--text2);
+                cursor: pointer;
+                transition: color 0.2s;
+                white-space: nowrap;
+                letter-spacing: -0.01em;
+                position: relative;
+                z-index: 1;
+            }
+            .city-btn:hover {
+                color: var(--text);
+            }
+            .city-btn.active {
+                color: var(--text);
+            }
+            .city-btn:disabled {
+                opacity: 0.45;
+                cursor: not-allowed;
+            }
+
+            .header-stats {
+                font-family: var(--mono);
+                font-size: 11px;
+                color: var(--text3);
+                margin-left: auto;
+                letter-spacing: -0.01em;
+            }
+            .header-status {
+                font-family: var(--mono);
+                font-size: 11px;
+                color: var(--text3);
+            }
+            .header-status.loading {
+                color: var(--walk);
+            }
+            .header-status.error {
+                color: var(--walk-egress);
+            }
+
+            /* main layout */
+            .main {
+                display: flex;
+                flex: 1;
+                min-height: 0;
+            }
+
+            /* sidebar */
+            .sidebar {
+                width: var(--sidebar-w);
+                min-width: var(--sidebar-w);
+                background: var(--surface);
+                border-right: 1px solid var(--border);
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+            }
+            .sidebar-form {
+                padding: 16px;
+                border-bottom: 1px solid var(--border);
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            /* location inputs */
+            .location-fields {
+                display: flex;
+                flex-direction: column;
+                gap: 0;
+                border: 1px solid var(--border2);
+                border-radius: var(--radius-sm);
+                overflow: hidden;
+            }
+            .field {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                padding: 0 12px;
+                background: var(--surface);
+                min-height: 44px;
+            }
+            .field + .field {
+                border-top: 1px solid var(--border);
+            }
+            .field-dot {
+                width: 9px;
+                height: 9px;
+                border-radius: 50%;
+                flex-shrink: 0;
+            }
+            .field-dot.origin {
+                background: var(--accent);
+            }
+            .field-dot.dest {
+                background: var(--walk-egress);
+            }
+            .field input {
+                flex: 1;
+                background: transparent;
+                border: none;
+                font-family: var(--mono);
+                font-size: 12px;
+                color: var(--text);
+                outline: none;
+                min-width: 0;
+            }
+            .field input::placeholder {
+                color: var(--text3);
+            }
+
+            /* options row */
+            .options-row {
+                display: flex;
+                gap: 8px;
+            }
+            .opt-group {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                flex: 1;
+            }
+            .opt-group label {
+                font-size: 10px;
+                font-weight: 600;
+                color: var(--text3);
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+            }
+            .opt-group input,
+            .opt-group select {
+                background: var(--surface2);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                padding: 6px 8px;
+                font-family: var(--mono);
+                font-size: 11.5px;
+                color: var(--text);
+                outline: none;
+                -webkit-appearance: none;
+                appearance: none;
+                width: 100%;
+            }
+            .opt-group select {
+                cursor: pointer;
+                background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%239898a0'/%3E%3C/svg%3E");
+                background-repeat: no-repeat;
+                background-position: right 8px center;
+                padding-right: 24px;
+            }
+
+            /* plan button */
+            .plan-btn {
+                display: block;
+                width: 100%;
+                padding: 11px;
+                background: var(--accent);
+                color: #fff;
+                border: none;
+                border-radius: var(--radius-sm);
+                font-family: var(--sans);
+                font-size: 14px;
+                font-weight: 600;
+                letter-spacing: -0.01em;
+                cursor: pointer;
+                transition: background 0.12s;
+                transform-origin: center;
+                will-change: transform;
+            }
+            .plan-btn:hover {
+                background: var(--accent-dark);
+            }
+            .plan-btn:disabled {
+                background: var(--border);
+                color: var(--text3);
+                cursor: not-allowed;
+            }
+
+            .hint {
+                font-size: 12px;
+                color: var(--text3);
+                line-height: 1.4;
+                text-align: center;
+            }
+
+            /* results */
+            .results {
+                flex: 1;
+                overflow-y: auto;
+                padding: 0;
+            }
+            .results::-webkit-scrollbar {
+                width: 4px;
+            }
+            .results::-webkit-scrollbar-track {
+                background: transparent;
+            }
+            .results::-webkit-scrollbar-thumb {
+                background: var(--border2);
+                border-radius: 2px;
+            }
+
+            .result-meta {
+                font-family: var(--mono);
+                font-size: 11px;
+                color: var(--text3);
+                padding: 10px 16px 8px;
+                border-bottom: 1px solid var(--border);
+                letter-spacing: -0.01em;
+            }
+
+            /* plan card */
+            .plan-card {
+                background: var(--surface);
+                border-bottom: 1px solid var(--border);
+                overflow: hidden;
+                cursor: pointer;
+            }
+            .plan-card:first-child {
+                border-top: 1px solid var(--border);
+            }
+            .plan-card:hover {
+                background: var(--surface2);
+            }
+            .plan-card.active {
+                background: var(--surface);
+            }
+            .plan-head {
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                padding: 11px 16px 8px;
+            }
+            .plan-head .duration {
+                font-size: 20px;
+                font-weight: 700;
+                letter-spacing: -0.03em;
+                color: var(--text);
+            }
+            .plan-head .duration span {
+                font-size: 13px;
+                font-weight: 500;
+                color: var(--text2);
+                margin-left: 2px;
+            }
+            .plan-head .time {
+                font-family: var(--mono);
+                font-size: 12px;
+                color: var(--text2);
+            }
+            .plan-legs {
+                display: flex;
+                align-items: center;
+                gap: 3px;
+                padding: 0 16px 11px;
+                flex-wrap: wrap;
+            }
+            .leg-pill {
+                display: flex;
+                align-items: center;
+                gap: 3px;
+                padding: 3px 9px;
+                border-radius: 20px;
+                font-size: 12px;
+                font-weight: 600;
+                white-space: nowrap;
+                letter-spacing: -0.01em;
+            }
+            .leg-pill.walk {
+                background: rgba(0,0,0,0.07);
+                color: var(--text2);
+            }
+            .leg-pill.walk-egress {
+                background: rgba(0,0,0,0.07);
+                color: var(--text2);
+            }
+            .leg-pill.walk-transfer {
+                background: rgba(0,0,0,0.07);
+                color: var(--text2);
+            }
+            .leg-pill.transit {
+                /* color set inline */
+            }
+            .leg-sep {
+                color: var(--text3);
+                font-size: 10px;
+                line-height: 1;
+                flex-shrink: 0;
+            }
+
+            /* expanded plan detail */
+            .plan-detail {
+                border-top: 1px solid var(--border);
+                padding: 10px 16px 12px;
+                overflow: hidden;
+                height: 0;
+                opacity: 0;
+                background: var(--surface2);
+                transition:
+                    height 0.42s linear(
+                        0, 0.009, 0.035, 0.077, 0.132, 0.197,
+                        0.265, 0.332, 0.395, 0.451, 0.5, 0.542,
+                        0.577, 0.607, 0.631, 0.652, 0.669, 0.683,
+                        0.724, 0.762, 0.808, 0.847, 0.879, 0.905,
+                        0.926, 0.943, 0.956, 0.966, 0.974, 0.98,
+                        0.985, 0.989, 0.993, 0.996, 0.998, 1
+                    ),
+                    opacity 0.22s ease;
+            }
+            .plan-card.active .plan-detail {
+                opacity: 1;
+                /* height set by JS */
+            }
+            .leg-detail {
+                padding: 8px 0;
+                border-bottom: 1px solid var(--border);
+            }
+            .leg-detail:last-child {
+                border-bottom: none;
+                padding-bottom: 0;
+            }
+            .leg-detail:first-child {
+                padding-top: 0;
+            }
+            .leg-label {
+                font-size: 11px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                margin-bottom: 4px;
+            }
+            .leg-label.walk-access { color: var(--walk); }
+            .leg-label.walk-egress { color: var(--walk-egress); }
+            .leg-label.walk-transfer { color: var(--walk-transfer); }
+            .leg-label.transit-lbl { color: var(--accent); }
+            .leg-info {
+                font-family: var(--mono);
+                font-size: 11.5px;
+                color: var(--text2);
+                line-height: 1.55;
+            }
+            .stop-list {
+                margin-top: 5px;
+                padding-left: 12px;
+                font-family: var(--mono);
+                font-size: 11px;
+                color: var(--text3);
+                line-height: 1.65;
+            }
+            .stop-list .stop-name {
+                color: var(--text2);
+            }
+
+            /* map */
+            .map-wrap {
+                flex: 1;
+                position: relative;
+            }
+            #map {
+                width: 100%;
+                height: 100%;
+            }
+
+            /* map cursor */
+            .leaflet-container {
+                cursor: crosshair !important;
+                font-family: var(--sans) !important;
+            }
+            .leaflet-container.leaflet-dragging {
+                cursor: grabbing !important;
+            }
+
+            /* loading overlay */
+            .loading-overlay {
+                position: absolute;
+                inset: 0;
+                background: rgba(245,245,247,0.9);
+                backdrop-filter: blur(4px);
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                z-index: 999;
+                gap: 14px;
+            }
+            .loading-overlay.hidden {
+                display: none;
+            }
+            .spinner {
+                width: 32px;
+                height: 32px;
+                border: 2.5px solid var(--border2);
+                border-top-color: var(--accent);
+                border-radius: 50%;
+                animation: spin 0.65s linear infinite;
+            }
+            @keyframes spin {
+                to { transform: rotate(360deg); }
+            }
+            .loading-text {
+                font-family: var(--mono);
+                font-size: 12px;
+                color: var(--text2);
+            }
+
+            /* markers */
+            .custom-marker {
+                width: 14px;
+                height: 14px;
+                border-radius: 50%;
+                border: 2.5px solid #fff;
+                box-shadow: 0 1px 5px rgba(0,0,0,0.25);
+            }
+            .marker-origin { background: var(--accent); }
+            .marker-dest { background: var(--walk-egress); }
+
+            /* no plans */
+            .no-plans {
+                text-align: center;
+                padding: 40px 20px;
+                color: var(--text3);
+                font-size: 13px;
+                line-height: 1.5;
+            }
+
+            /* leaflet overrides for light mode */
+            .leaflet-control-zoom a {
+                background: var(--surface) !important;
+                color: var(--text) !important;
+                border-color: var(--border2) !important;
+                font-family: var(--sans) !important;
+            }
+            .leaflet-control-zoom a:hover {
+                background: var(--surface2) !important;
+            }
+            .leaflet-control-attribution {
+                background: rgba(255,255,255,0.75) !important;
+                font-size: 10px !important;
+                color: var(--text3) !important;
+            }
+            .stop-tooltip {
+                background: var(--surface) !important;
+                color: var(--text) !important;
+                border: 1px solid var(--border) !important;
+                border-radius: 6px !important;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1) !important;
+                font-family: var(--sans) !important;
+                font-size: 12px !important;
+                padding: 4px 8px !important;
+            }
+            .stop-tooltip::before {
+                display: none !important;
+            }
+
+            /* responsive */
+            @media (max-width: 800px) {
+                .main { flex-direction: column-reverse; }
+                .sidebar {
+                    width: 100%;
+                    min-width: auto;
+                    max-height: 52vh;
+                    border-right: none;
+                    border-top: 1px solid var(--border);
+                }
+                .map-wrap { flex: 1; }
+                .location-fields { display: none; }
+            }
+            @media (max-width: 500px) {
+                .opt-group.opt-walkspeed { display: none; }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <img class="header-logo" src="images/logomark-light.png" alt="Wheels Router Nano" />
+            <div class="city-switcher" id="citySwitcher">
+                <div class="city-slider" id="citySlider"></div>
+                <button class="city-btn active" id="cityBtnHK" onclick="switchCity('hk')">Hong Kong</button>
+                <button class="city-btn" id="cityBtnSF" onclick="switchCity('sf')">San Francisco</button>
+            </div>
+            <div class="header-stats" id="stats"></div>
+            <div class="header-status loading" id="status">loading...</div>
+        </div>
+
+        <div class="main">
+            <div class="sidebar">
+                <div class="sidebar-form">
+                    <div class="location-fields">
+                        <div class="field">
+                            <div class="field-dot origin"></div>
+                            <input type="text" id="origin" placeholder="click map or enter lat,lon" readonly />
+                        </div>
+                        <div class="field">
+                            <div class="field-dot dest"></div>
+                            <input type="text" id="dest" placeholder="click map or enter lat,lon" readonly />
+                        </div>
+                    </div>
+                    <div class="options-row">
+                        <div class="opt-group">
+                            <label>date</label>
+                            <input type="date" id="date" />
+                        </div>
+                        <div class="opt-group">
+                            <label>time</label>
+                            <input type="time" id="time" value="08:00" />
+                        </div>
+                        <div class="opt-group opt-walkspeed">
+                            <label>walk speed</label>
+                            <select id="walkspeed">
+                                <option value="slow">slow</option>
+                                <option value="normal" selected>normal</option>
+                                <option value="fast">fast</option>
+                            </select>
+                        </div>
+                    </div>
+                    <button class="plan-btn" id="planBtn" disabled>Plan Trip</button>
+                    <div class="hint" id="hint">click the map to set origin, then destination</div>
+                </div>
+                <div class="results" id="results"></div>
+            </div>
+            <div class="map-wrap">
+                <div id="map"></div>
+                <div class="loading-overlay" id="loadingOverlay">
+                    <div class="spinner"></div>
+                    <div class="loading-text" id="loadingText">initializing wasm engine...</div>
+                </div>
+            </div>
+        </div>
+
+        <script type="module">
+            import init, { WasmRouter } from "./pkg/wheels_router_nano.js";
+
+            // city config
+            const CITIES = {
+                sf: {
+                    label: "San Francisco",
+                    file: "data/sf.wheelsrouter.gz",
+                    center: [37.77, -122.42],
+                    zoom: 13,
+                },
+                hk: {
+                    label: "Hong Kong",
+                    file: "data/hk.wheelsrouter.gz",
+                    center: [22.32, 114.17],
+                    zoom: 13,
+                },
+            };
+
+            let router = null;
+            let wasmReady = false;
+            let currentCity = "hk";
+            let switchingCity = false;
+            let originMarker = null;
+            let destMarker = null;
+            let originLatLon = null;
+            let destLatLon = null;
+            let clickState = "origin";
+            let routeLines = [];
+            let activePlanIdx = -1;
+            let plans = [];
+
+            // set default date/time to now
+            const dateInput = document.getElementById("date");
+            const now = new Date();
+            dateInput.value = now.toISOString().slice(0, 10);
+            document.getElementById("time").value = now.toTimeString().slice(0, 5);
+
+            // init map
+            const map = L.map("map", {
+                zoomControl: false,
+                attributionControl: false,
+            }).setView([22.32, 114.17], 13);
+
+            L.control.zoom({ position: "topright" }).addTo(map);
+            L.control
+                .attribution({ position: "bottomright", prefix: false })
+                .addAttribution('&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>')
+                .addTo(map);
+
+            L.tileLayer(
+                "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+                { maxZoom: 19 },
+            ).addTo(map);
+
+            function makeIcon(cls) {
+                return L.divIcon({
+                    className: "",
+                    html: `<div class="custom-marker ${cls}"></div>`,
+                    iconSize: [14, 14],
+                    iconAnchor: [7, 7],
+                });
+            }
+
+            map.on("click", (e) => {
+                if (!router || switchingCity) return;
+                const { lat, lng } = e.latlng;
+                const coordStr = `${lat.toFixed(6)},${lng.toFixed(6)}`;
+                if (clickState === "origin") {
+                    originLatLon = [lat, lng];
+                    document.getElementById("origin").value = coordStr;
+                    if (originMarker) map.removeLayer(originMarker);
+                    originMarker = L.marker([lat, lng], { icon: makeIcon("marker-origin") }).addTo(map);
+                    clickState = "dest";
+                    document.getElementById("hint").textContent = "now click to set destination";
+                } else {
+                    destLatLon = [lat, lng];
+                    document.getElementById("dest").value = coordStr;
+                    if (destMarker) map.removeLayer(destMarker);
+                    destMarker = L.marker([lat, lng], { icon: makeIcon("marker-dest") }).addTo(map);
+                    clickState = "origin";
+                    document.getElementById("hint").textContent = "click Plan Trip, or click map to change origin";
+                    document.getElementById("planBtn").disabled = false;
+                }
+            });
+
+            document.getElementById("planBtn").addEventListener("click", doPlan);
+
+            // spring physics for button press
+            (function () {
+                const btn = document.getElementById("planBtn");
+                let scale = 1, vel = 0, target = 1, raf = null;
+                const stiffness = 320, damping = 22, mass = 1;
+                function tick() {
+                    const force = -stiffness * (scale - target) - damping * vel;
+                    vel += (force / mass) * (1 / 60);
+                    scale += vel * (1 / 60);
+                    btn.style.transform = `scale(${scale})`;
+                    const settled = Math.abs(scale - target) < 0.0005 && Math.abs(vel) < 0.0005;
+                    if (!settled) { raf = requestAnimationFrame(tick); }
+                    else { scale = target; vel = 0; btn.style.transform = `scale(${scale})`; raf = null; }
+                }
+                function spring(t) { target = t; if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(tick); }
+                btn.addEventListener("mousedown", () => spring(0.93));
+                btn.addEventListener("mouseup", () => spring(1));
+                btn.addEventListener("mouseleave", () => spring(1));
+                btn.addEventListener("touchstart", () => spring(0.93), { passive: true });
+                btn.addEventListener("touchend", () => spring(1), { passive: true });
+            })();
+
+            // gzip decompress using DecompressionStream("gzip") — universally supported
+            // chrome 80+, safari 15.4+, ff 113+
+            async function fetchAndDecompress(url) {
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`failed to fetch ${url}: ${resp.status}`);
+                const ds = new DecompressionStream("gzip");
+                const body = resp.body.pipeThrough(ds);
+                const reader = body.getReader();
+                const chunks = [];
+                let totalLen = 0;
+                for (;;) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    chunks.push(value);
+                    totalLen += value.byteLength;
+                }
+                const out = new Uint8Array(totalLen);
+                let off = 0;
+                for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+                return out;
+            }
+
+            async function loadCity(cityKey) {
+                const city = CITIES[cityKey];
+                const overlay = document.getElementById("loadingOverlay");
+                const loadText = document.getElementById("loadingText");
+                const statusEl = document.getElementById("status");
+                const statsEl = document.getElementById("stats");
+
+                overlay.classList.remove("hidden");
+                loadText.textContent = `loading ${city.label}...`;
+                statusEl.textContent = "loading...";
+                statusEl.className = "header-status loading";
+                document.getElementById("planBtn").disabled = true;
+                document.getElementById("results").innerHTML = "";
+
+                try {
+                    loadText.textContent = `fetching ${city.label} data...`;
+                    const buf = await fetchAndDecompress(city.file);
+
+                    loadText.textContent = "building routing graph...";
+                    // free previous router if any
+                    if (router && typeof router.free === "function") router.free();
+                    router = new WasmRouter(buf);
+
+                    const stats = router.stats();
+                    statsEl.textContent = `${stats.stops} stops · ${stats.routes} routes · ${stats.trips} trips`;
+                    statusEl.textContent = "";
+                    statusEl.className = "header-status";
+                    overlay.classList.add("hidden");
+                } catch (e) {
+                    loadText.textContent = `error: ${e.message}`;
+                    statusEl.textContent = "error";
+                    statusEl.className = "header-status error";
+                    console.error(e);
+                }
+            }
+
+            // position the sliding indicator behind the active city button
+            function positionSlider(cityKey, animate) {
+                const slider = document.getElementById("citySlider");
+                const switcher = document.getElementById("citySwitcher");
+                const btn = cityKey === "hk"
+                    ? document.getElementById("cityBtnHK")
+                    : document.getElementById("cityBtnSF");
+                const switcherRect = switcher.getBoundingClientRect();
+                const btnRect = btn.getBoundingClientRect();
+                const offset = btnRect.left - switcherRect.left - 3; // 3px = padding
+                slider.style.width = btnRect.width + "px";
+                if (!animate) slider.style.transition = "none";
+                slider.style.transform = `translateX(${offset}px)`;
+                if (!animate) slider.offsetHeight; // force reflow
+                if (!animate) slider.style.transition = "";
+            }
+
+            // expose for onclick
+            window.switchCity = async function (cityKey) {
+                if (cityKey === currentCity || switchingCity) return;
+                switchingCity = true;
+
+                // update button states and animate slider
+                document.getElementById("cityBtnSF").classList.toggle("active", cityKey === "sf");
+                document.getElementById("cityBtnHK").classList.toggle("active", cityKey === "hk");
+                positionSlider(cityKey, true);
+                document.getElementById("cityBtnSF").disabled = true;
+                document.getElementById("cityBtnHK").disabled = true;
+
+                // clear map state
+                clearRoutes();
+                if (originMarker) { map.removeLayer(originMarker); originMarker = null; }
+                if (destMarker) { map.removeLayer(destMarker); destMarker = null; }
+                originLatLon = null;
+                destLatLon = null;
+                document.getElementById("origin").value = "";
+                document.getElementById("dest").value = "";
+                document.getElementById("hint").textContent = "click the map to set origin, then destination";
+                clickState = "origin";
+                plans = [];
+
+                // fly map to new city
+                const city = CITIES[cityKey];
+                map.flyTo(city.center, city.zoom, { duration: 1.2 });
+
+                currentCity = cityKey;
+                await loadCity(cityKey);
+
+                document.getElementById("cityBtnSF").disabled = false;
+                document.getElementById("cityBtnHK").disabled = false;
+                switchingCity = false;
+            };
+
+            function doPlan() {
+                if (!router || !originLatLon || !destLatLon) return;
+                clearRoutes();
+                activePlanIdx = -1;
+
+                const dateVal = document.getElementById("date").value;
+                const timeVal = document.getElementById("time").value;
+                const ws = document.getElementById("walkspeed").value;
+                const departAt = `${dateVal}T${timeVal}:00Z`;
+                const request = {
+                    origin: `${originLatLon[0]},${originLatLon[1]}`,
+                    destination: `${destLatLon[0]},${destLatLon[1]}`,
+                    depart_at: departAt,
+                    walking_speed: ws,
+                    max_results: 5,
+                };
+
+                const t0 = performance.now();
+                let result;
+                try {
+                    result = router.plan(request);
+                } catch (e) {
+                    document.getElementById("results").innerHTML =
+                        `<div class="no-plans">error: ${e.message}</div>`;
+                    return;
+                }
+                const elapsed = (performance.now() - t0).toFixed(1);
+
+                plans = result.plans || [];
+                renderResults(plans, elapsed);
+                if (plans.length > 0) selectPlan(0);
+            }
+
+            function renderResults(plans, elapsed) {
+                const el = document.getElementById("results");
+                if (plans.length === 0) {
+                    el.innerHTML = `<div class="no-plans">no routes found.<br>try different locations or a different date/time.</div>`;
+                    return;
+                }
+                let html = `<div class="result-meta">${plans.length} plan${plans.length > 1 ? "s" : ""} &middot; ${elapsed}ms</div>`;
+                plans.forEach((p, idx) => {
+                    const mins = Math.round(p.duration_seconds / 60);
+                    html += `<div class="plan-card" data-idx="${idx}" onclick="window.__selectPlan(${idx})">`;
+                    html += `<div class="plan-head">
+                        <span class="duration">${mins}<span>min</span></span>
+                        <span class="time">${formatTime(p.start_time)}</span>
+                    </div>`;
+                    html += `<div class="plan-legs">`;
+                    let prevPillAdded = false;
+                    p.legs.forEach((leg, li) => {
+                        if (leg.type === "walk") {
+                            const m = leg.distance_meters || Math.round(leg.duration_seconds * 1.2);
+                            if (m < 200 && p.legs.some(l => l.type === "transit")) return;
+                            if (prevPillAdded) html += `<span class="leg-sep">&#8250;</span>`;
+                            const wt = leg.walk_type || "walk";
+                            const pillClass = wt === "station_egress" ? "walk-egress"
+                                : wt === "station_transfer" ? "walk-transfer" : "walk";
+                            html += `<span class="leg-pill ${pillClass}">${m}m</span>`;
+                            prevPillAdded = true;
+                        } else if (leg.type === "transit") {
+                            if (prevPillAdded) html += `<span class="leg-sep">&#8250;</span>`;
+                            const ro = leg.route_options[0];
+                            const bg = ro.color ? `#${ro.color}` : "#007aff";
+                            const tc = ro.text_color ? `#${ro.text_color}` : "#fff";
+                            html += `<span class="leg-pill transit" style="background:${bg};color:${tc}">${ro.route_name}</span>`;
+                            prevPillAdded = true;
+                        }
+                    });
+                    html += `</div>`;
+                    html += `<div class="plan-detail">`;
+                    p.legs.forEach((leg) => {
+                        if (leg.type === "walk") {
+                            const wt = leg.walk_type || "walk";
+                            const m = leg.distance_meters || Math.round(leg.duration_seconds * 1.2);
+                            if (m < 200 && p.legs.some(l => l.type === "transit")) return;
+                            const label = wt === "station_access" ? "walk to stop"
+                                : wt === "station_egress" ? "walk from stop"
+                                : wt === "station_transfer" ? "transfer walk" : "walk";
+                            const colorClass = wt === "station_egress" ? "walk-egress"
+                                : wt === "station_transfer" ? "walk-transfer" : "walk-access";
+                            const s = Math.round(leg.duration_seconds / 60);
+                            const fromName = leg.from?.address || leg.from?.stop_id || "";
+                            const toName = leg.to?.address || leg.to?.stop_id || "";
+                            html += `<div class="leg-detail">
+                                <div class="leg-label ${colorClass}">${label}</div>
+                                <div class="leg-info">${fromName} &rarr; ${toName}<br>${m}m &middot; ~${s} min</div>
+                            </div>`;
+                        } else if (leg.type === "transit") {
+                            const ro = leg.route_options[0];
+                            const s = Math.round(ro.duration_seconds / 60);
+                            html += `<div class="leg-detail">
+                                <div class="leg-label transit-lbl">${ro.mode} &middot; ${ro.route_name}${ro.headsign ? " &rarr; " + ro.headsign : ""}</div>
+                                <div class="leg-info">${ro.from.stop_name || ""} &rarr; ${ro.to.stop_name || ""} &middot; ${s} min${ro.start_time ? " @ " + formatTime(ro.start_time) : ""}</div>
+                                <div class="stop-list">`;
+                            (ro.stops || []).forEach((st) => {
+                                html += `<div><span class="stop-name">${st.stop_name || st.stop_id || ""}</span></div>`;
+                            });
+                            html += `</div></div>`;
+                        }
+                    });
+                    html += `</div></div>`;
+                });
+                el.innerHTML = html;
+            }
+
+            window.__selectPlan = function (idx) { selectPlan(idx); };
+
+            function selectPlan(idx) {
+                document.querySelectorAll(".plan-card").forEach((c, i) => {
+                    const detail = c.querySelector(".plan-detail");
+                    if (!detail) return;
+                    if (i === idx) {
+                        c.classList.add("active");
+                        detail.style.transition = "none";
+                        detail.style.height = "auto";
+                        const h = detail.scrollHeight;
+                        detail.style.height = "0px";
+                        detail.offsetHeight;
+                        detail.style.transition = "";
+                        detail.style.height = h + "px";
+                    } else {
+                        c.classList.remove("active");
+                        detail.style.height = "0px";
+                    }
+                });
+                activePlanIdx = idx;
+                clearRoutes();
+                drawPlanOnMap(plans[idx]);
+            }
+
+            function clearRoutes() {
+                routeLines.forEach((l) => map.removeLayer(l));
+                routeLines = [];
+            }
+
+            function drawPlanOnMap(plan) {
+                if (!plan) return;
+                const allCoords = [];
+                const walkStyles = {
+                    station_access: { color: "#ff9500", weight: 3, dashArray: "5,7", opacity: 0.85 },
+                    station_egress: { color: "#ff3b30", weight: 3, dashArray: "5,7", opacity: 0.85 },
+                    station_transfer: { color: "#af52de", weight: 3, dashArray: "4,5", opacity: 0.85 },
+                    walk: { color: "#ff9500", weight: 3, dashArray: "5,7", opacity: 0.85 },
+                };
+                plan.legs.forEach((leg) => {
+                    if (leg.type === "walk") {
+                        const coords = [];
+                        if (leg.path && leg.path.length >= 2) {
+                            leg.path.forEach((p) => coords.push([p.lat, p.lon]));
+                        } else {
+                            const from = leg.from?.location;
+                            const to = leg.to?.location;
+                            if (from && to) coords.push([from.lat, from.lon], [to.lat, to.lon]);
+                        }
+                        if (coords.length >= 2) {
+                            const wt = leg.walk_type || "walk";
+                            const style = walkStyles[wt] || walkStyles.walk;
+                            routeLines.push(L.polyline(coords, style).addTo(map));
+                            allCoords.push(...coords);
+                        }
+                    } else if (leg.type === "transit") {
+                        const ro = leg.route_options[0];
+                        const color = ro.color ? `#${ro.color}` : "#007aff";
+                        const coords = (ro.stops || [])
+                            .filter((s) => s.location)
+                            .map((s) => [s.location.lat, s.location.lon]);
+                        if (coords.length >= 2) {
+                            routeLines.push(L.polyline(coords, { color, weight: 4, opacity: 0.95 }).addTo(map));
+                            coords.forEach((c, i) => {
+                                const stop = ro.stops[i];
+                                const circle = L.circleMarker(c, {
+                                    radius: 3.5, fillColor: "#fff", color, weight: 2, fillOpacity: 1,
+                                }).addTo(map);
+                                if (stop.stop_name) {
+                                    circle.bindTooltip(stop.stop_name, {
+                                        className: "stop-tooltip", direction: "top", offset: [0, -6],
+                                    });
+                                }
+                                routeLines.push(circle);
+                            });
+                            allCoords.push(...coords);
+                        }
+                    }
+                });
+                if (allCoords.length > 0) map.fitBounds(L.latLngBounds(allCoords).pad(0.15));
+            }
+
+            function formatTime(iso) {
+                if (!iso) return "";
+                const m = iso.match(/T(\d{2}):(\d{2})/);
+                if (!m) return iso;
+                let h = parseInt(m[1]);
+                const ampm = h >= 12 ? "pm" : "am";
+                if (h > 12) h -= 12;
+                if (h === 0) h = 12;
+                return `${h}:${m[2]}${ampm}`;
+            }
+
+            // startup: init wasm then load default city (HK)
+            async function startup() {
+                const loadText = document.getElementById("loadingText");
+                const statusEl = document.getElementById("status");
+                try {
+                    loadText.textContent = "initializing wasm engine...";
+                    await init();
+                    wasmReady = true;
+                    positionSlider("hk", false);
+                    await loadCity("hk");
+                } catch (e) {
+                    loadText.textContent = `error: ${e.message}`;
+                    statusEl.textContent = "error";
+                    statusEl.className = "header-status error";
+                    console.error(e);
+                }
+            }
+
+            // responsive: float city switcher over map when header overflows
+            (function () {
+                const header = document.querySelector(".header");
+                const switcher = document.getElementById("citySwitcher");
+                const mapWrap = document.querySelector(".map-wrap");
+                let isFloating = false;
+
+                function checkOverflow() {
+                    // temporarily restore to header to measure
+                    if (isFloating) {
+                        switcher.classList.remove("floating");
+                        header.insertBefore(switcher, header.children[1]);
+                        isFloating = false;
+                    }
+                    const overflow = header.scrollWidth > header.clientWidth;
+                    if (overflow) {
+                        mapWrap.appendChild(switcher);
+                        switcher.classList.add("floating");
+                        isFloating = true;
+                    }
+                    // reposition slider after reparenting
+                    positionSlider(currentCity, false);
+                }
+
+                const ro = new ResizeObserver(checkOverflow);
+                ro.observe(header);
+            })();
+
+            startup();
+        </script>
+    </body>
+</html>

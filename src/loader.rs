@@ -142,12 +142,24 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
     let tr_reader = root.get_trips()?;
     let mut trips = Vec::with_capacity(tr_reader.len() as usize);
     for t in tr_reader.iter() {
+        let fr_reader = t.get_frequency_rules()?;
+        let mut frequency_rules = Vec::with_capacity(fr_reader.len() as usize);
+        for fr in fr_reader.iter() {
+            frequency_rules.push(FrequencyRule {
+                start_time: fr.get_start_time(),
+                end_time: fr.get_end_time(),
+                headway_secs: fr.get_headway_secs(),
+                exact_times: fr.get_exact_times(),
+            });
+        }
         trips.push(Trip {
             id: t.get_id()?.to_string()?,
             route_idx: t.get_route_idx(),
             service_idx: t.get_service_idx(),
             headsign: t.get_headsign()?.to_string()?,
             direction_id: t.get_direction_id(),
+            frequency_rules,
+            template_first_departure: t.get_template_first_departure(),
         });
     }
 

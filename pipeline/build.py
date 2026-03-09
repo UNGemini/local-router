@@ -184,9 +184,8 @@ class GtfsData:
             if tid in self.trip_id_map:
                 self.frequencies[tid].append(row)
 
-        # expand frequency-based trips into concrete stop_times
-        if self.frequencies:
-            self._expand_frequencies()
+        # frequency trips: kept as templates, not expanded.
+        # frequencyRules are stored in the capnp output and handled at query time.
 
         # ---- fare data (v1, kept simple) ----
         self.fare_attrs = {}
@@ -394,7 +393,7 @@ def build_service_bitfields(gtfs):
     for sid, svc in gtfs.services.items():
         start = svc["start"]
         end = svc["end"]
-        num_days = min((end - start).days + 1, 1024)
+        num_days = (end - start).days + 1
         if num_days <= 0:
             num_days = 1
         bits = bytearray((num_days + 7) // 8)
@@ -940,6 +939,22 @@ def build_capnp(gtfs, patterns, services, svc_id_map, transfers, walk_nodes, wal
         tr_list[i].serviceIdx = svc_id_map.get(sid, MAX_U32)
         tr_list[i].headsign = t.get("trip_headsign", "")
         tr_list[i].directionId = int(t.get("direction_id", "0") or "0")
+
+        # write frequency rules if this is a template trip
+        freq_entries = gtfs.frequencies.get(t["trip_id"], [])
+        if freq_entries:
+            rules = tr_list[i].init("frequencyRules", len(freq_entries))
+            for fi, fe in enumerate(freq_entries):
+                rules[fi].startTime = parse_time(fe.get("start_time", ""))
+                rules[fi].endTime = parse_time(fe.get("end_time", ""))
+                rules[fi].headwaySecs = int(fe.get("headway_secs", "0") or "0")
+                rules[fi].exactTimes = fe.get("exact_times", "0") == "1"
+            # compute templateFirstDeparture from first stop_time
+            sts = gtfs.stop_times_by_trip.get(t["trip_id"], [])
+            if sts:
+                first_dep = parse_time(sts[0].get("departure_time", "")
+                                       or sts[0].get("arrival_time", ""))
+                tr_list[i].templateFirstDeparture = first_dep if first_dep != MAX_U32 else 0
 
     # fare rules: map gtfs route idx to all pattern indices that reference it
     gtfs_route_to_patterns = defaultdict(list)
