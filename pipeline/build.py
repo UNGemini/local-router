@@ -176,6 +176,17 @@ class GtfsData:
         # ---- transfers.txt ----
         self.raw_transfers = read_csv(zf, "transfers.txt")
 
+        # ---- frequencies.txt ----
+        self.frequencies = defaultdict(list)
+        for row in read_csv(zf, "frequencies.txt"):
+            tid = row.get("trip_id", "")
+            if tid in self.trip_id_map:
+                self.frequencies[tid].append(row)
+
+        # expand frequency-based trips into concrete stop_times
+        if self.frequencies:
+            self._expand_frequencies()
+
         # ---- fare data (v1, kept simple) ----
         self.fare_attrs = {}
         for row in read_csv(zf, "fare_attributes.txt"):
@@ -183,6 +194,85 @@ class GtfsData:
         self.fare_rules = read_csv(zf, "fare_rules.txt")
 
         zf.close()
+
+
+    def _expand_frequencies(self):
+        """
+        expand frequency entries into concrete trips.
+        for exact_times=1: generate trips at every headway interval.
+        for exact_times=0: same expansion (common approximation used by most routers).
+        the original template trip is removed since its stop_times are just a template.
+        """
+        expanded_count = 0
+        template_tids = set()
+        for tid, freq_entries in self.frequencies.items():
+            template_sts = self.stop_times_by_trip.get(tid, [])
+            if len(template_sts) < 2:
+                continue
+            # compute time offsets relative to first departure
+            first_dep = parse_time(template_sts[0].get("departure_time", "")
+                                   or template_sts[0].get("arrival_time", ""))
+            if first_dep == MAX_U32:
+                continue
+            offsets = []
+            for st in template_sts:
+                arr = parse_time(st.get("arrival_time", ""))
+                dep = parse_time(st.get("departure_time", ""))
+                offsets.append((
+                    (arr - first_dep) if arr != MAX_U32 else MAX_U32,
+                    (dep - first_dep) if dep != MAX_U32 else MAX_U32,
+                    st,
+                ))
+
+            template_trip = self.trips[self.trip_id_map[tid]]
+            template_tids.add(tid)
+
+            for fentry in freq_entries:
+                start = parse_time(fentry.get("start_time", ""))
+                end = parse_time(fentry.get("end_time", ""))
+                headway = int(fentry.get("headway_secs", "0") or "0")
+                if start == MAX_U32 or end == MAX_U32 or headway <= 0:
+                    continue
+
+                t = start
+                seq = 0
+                while t < end:
+                    new_tid = f"{tid}_freq_{seq}"
+                    new_trip = dict(template_trip)
+                    new_trip["trip_id"] = new_tid
+                    new_idx = len(self.trips)
+                    self.trip_id_map[new_tid] = new_idx
+                    self.trips.append(new_trip)
+
+                    new_sts = []
+                    for arr_off, dep_off, orig_st in offsets:
+                        nst = dict(orig_st)
+                        nst["trip_id"] = new_tid
+                        if arr_off != MAX_U32:
+                            nst["arrival_time"] = _secs_to_timestr(t + arr_off)
+                        if dep_off != MAX_U32:
+                            nst["departure_time"] = _secs_to_timestr(t + dep_off)
+                        new_sts.append(nst)
+                    self.stop_times_by_trip[new_tid] = new_sts
+                    expanded_count += 1
+                    t += headway
+                    seq += 1
+
+        # remove template trips from stop_times (they are not real scheduled trips)
+        for tid in template_tids:
+            if tid in self.stop_times_by_trip:
+                del self.stop_times_by_trip[tid]
+
+        if expanded_count:
+            print(f"  expanded {len(template_tids)} frequency templates into {expanded_count} concrete trips")
+
+
+def _secs_to_timestr(secs):
+    """convert seconds since midnight to hh:mm:ss"""
+    h = secs // 3600
+    m = (secs % 3600) // 60
+    s = secs % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +568,7 @@ def compute_transfers(gtfs):
 # ---------------------------------------------------------------------------
 
 def build_walk_graph(osm_path):
-    """extract pedestrian-walkable graph from osm pbf. returns (nodes, edges_dict)."""
+    """extract pedestrian-walkable graph from osm. returns (nodes, edges_dict)."""
     import osmium
 
     WALKABLE = {
@@ -491,7 +581,6 @@ def build_walk_graph(osm_path):
         def __init__(self):
             super().__init__()
             self.node_coords = {}
-            self._needed_nodes = set()
             self._ways = []
 
         def way(self, w):
@@ -502,13 +591,13 @@ def build_walk_graph(osm_path):
                 return
             if w.tags.get("access", "") == "private":
                 return
-            nodes = [n.ref for n in w.nodes]
+            nodes = []
+            for n in w.nodes:
+                nodes.append(n.ref)
+                # with locations=True, node locations are available on way nodes
+                if n.location.valid():
+                    self.node_coords[n.ref] = (n.location.lat, n.location.lon)
             self._ways.append(nodes)
-            self._needed_nodes.update(nodes)
-
-        def node(self, n):
-            if n.id in self._needed_nodes:
-                self.node_coords[n.id] = (n.location.lat, n.location.lon)
 
     handler = Handler()
     handler.apply_file(osm_path, locations=True)
@@ -516,9 +605,7 @@ def build_walk_graph(osm_path):
     # compact indexing
     node_idx_map = {}
     nodes = []
-    for nid in sorted(handler._needed_nodes):
-        if nid not in handler.node_coords:
-            continue
+    for nid in sorted(handler.node_coords.keys()):
         node_idx_map[nid] = len(nodes)
         nodes.append(handler.node_coords[nid])
 

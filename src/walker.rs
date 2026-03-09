@@ -3,10 +3,12 @@
 
 use crate::data::{WalkGraph, NOT_SET};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 
-const WALK_SPEED_MPS: f32 = 1.2;
+pub const DEFAULT_WALK_SPEED_MPS: f32 = 1.2;
 const EARTH_RADIUS: f32 = 6_371_000.0;
+// grid cell size for spatial indexing (~111m per 0.001 degree)
+const GRID_CELL: f32 = 0.001;
 
 // result of a walk search: reachable node index + distance in meters + time in seconds
 #[derive(Debug, Clone, Copy)]
@@ -26,18 +28,45 @@ pub fn haversine(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {
     EARTH_RADIUS * 2.0 * a.sqrt().asin()
 }
 
-// find the nearest walk graph node to a lat/lon
+fn grid_key(lat: f32, lon: f32) -> (i32, i32) {
+    ((lat / GRID_CELL) as i32, (lon / GRID_CELL) as i32)
+}
+
+// find the nearest walk graph node to a lat/lon using a grid spatial index
 pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     if graph.nodes.is_empty() {
         return None;
     }
+    // build grid index on the fly (for large graphs this should be precomputed,
+    // but for typical transit-area extracts this is fast enough)
+    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+    for (i, n) in graph.nodes.iter().enumerate() {
+        grid.entry(grid_key(n.lat, n.lon))
+            .or_default()
+            .push(i as u32);
+    }
+
+    let (gy, gx) = grid_key(lat, lon);
     let mut best_idx = 0u32;
     let mut best_dist = f32::MAX;
-    for (i, n) in graph.nodes.iter().enumerate() {
-        let d = haversine(lat, lon, n.lat, n.lon);
-        if d < best_dist {
-            best_dist = d;
-            best_idx = i as u32;
+    // search expanding radius: first try 3x3, then 5x5, then 7x7
+    for radius in [1i32, 2, 3] {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if let Some(nodes) = grid.get(&(gy + dy, gx + dx)) {
+                    for &ni in nodes {
+                        let n = &graph.nodes[ni as usize];
+                        let d = haversine(lat, lon, n.lat, n.lon);
+                        if d < best_dist {
+                            best_dist = d;
+                            best_idx = ni;
+                        }
+                    }
+                }
+            }
+        }
+        if best_dist < (radius as f32) * 111.0 {
+            break; // found something within the search radius
         }
     }
     if best_dist > 1000.0 {
@@ -48,8 +77,13 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
 }
 
 // dijkstra from a single source node, up to a max distance
-// returns distances in meters to all reachable nodes within max_dist
-pub fn dijkstra(graph: &WalkGraph, start: u32, max_dist: u32) -> Vec<WalkResult> {
+// returns map from node_idx -> (dist_meters, walk_seconds) for all reachable nodes
+pub fn dijkstra(
+    graph: &WalkGraph,
+    start: u32,
+    max_dist: u32,
+    walk_speed: f32,
+) -> HashMap<u32, (u32, u32)> {
     let n = graph.nodes.len();
     let mut dist = vec![u32::MAX; n];
     let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
@@ -76,14 +110,11 @@ pub fn dijkstra(graph: &WalkGraph, start: u32, max_dist: u32) -> Vec<WalkResult>
         }
     }
 
-    let mut results = Vec::new();
+    let mut results = HashMap::new();
     for (i, &d) in dist.iter().enumerate() {
-        if d < u32::MAX && i != start as usize {
-            results.push(WalkResult {
-                node_idx: i as u32,
-                dist_meters: d,
-                walk_seconds: (d as f32 / WALK_SPEED_MPS) as u32,
-            });
+        if d < u32::MAX {
+            let secs = (d as f32 / walk_speed) as u32;
+            results.insert(i as u32, (d, secs));
         }
     }
     results
@@ -97,6 +128,7 @@ pub fn reachable_stops_from_coord(
     lat: f32,
     lon: f32,
     max_walk_meters: u32,
+    walk_speed: f32,
 ) -> Vec<(u32, u32, u32)> {
     // if no walk graph, fall back to straight-line distance to stops
     if graph.nodes.is_empty() {
@@ -107,7 +139,7 @@ pub fn reachable_stops_from_coord(
             .filter_map(|(i, s)| {
                 let d = haversine(lat, lon, s.lat, s.lon) as u32;
                 if d <= max_walk_meters {
-                    let secs = (d as f32 / WALK_SPEED_MPS) as u32;
+                    let secs = (d as f32 / walk_speed) as u32;
                     Some((i as u32, secs, d))
                 } else {
                     None
@@ -127,7 +159,7 @@ pub fn reachable_stops_from_coord(
                 .filter_map(|(i, s)| {
                     let d = haversine(lat, lon, s.lat, s.lon) as u32;
                     if d <= max_walk_meters {
-                        let secs = (d as f32 / WALK_SPEED_MPS) as u32;
+                        let secs = (d as f32 / walk_speed) as u32;
                         Some((i as u32, secs, d))
                     } else {
                         None
@@ -141,9 +173,9 @@ pub fn reachable_stops_from_coord(
     let sn = &graph.nodes[start as usize];
     let extra_dist = haversine(lat, lon, sn.lat, sn.lon) as u32;
 
-    let walk_results = dijkstra(graph, start, max_walk_meters);
+    let walk_map = dijkstra(graph, start, max_walk_meters, walk_speed);
 
-    // map walk nodes back to stops
+    // map walk nodes back to stops using hashmap lookup
     let mut reachable = Vec::new();
     for (stop_idx, stop) in stops.iter().enumerate() {
         if stop.location_type != 0 {
@@ -153,20 +185,17 @@ pub fn reachable_stops_from_coord(
             // try straight-line as fallback
             let d = haversine(lat, lon, stop.lat, stop.lon) as u32;
             if d <= max_walk_meters {
-                let secs = (d as f32 / WALK_SPEED_MPS) as u32;
+                let secs = (d as f32 / walk_speed) as u32;
                 reachable.push((stop_idx as u32, secs, d));
             }
             continue;
         }
-        // check if this stop's walk node was reached
-        for wr in &walk_results {
-            if wr.node_idx == stop.walk_node_idx {
-                let total_dist = wr.dist_meters + extra_dist;
-                if total_dist <= max_walk_meters {
-                    let secs = (total_dist as f32 / WALK_SPEED_MPS) as u32;
-                    reachable.push((stop_idx as u32, secs, total_dist));
-                }
-                break;
+        // O(1) hashmap lookup instead of linear scan
+        if let Some(&(dist_m, _)) = walk_map.get(&stop.walk_node_idx) {
+            let total_dist = dist_m + extra_dist;
+            if total_dist <= max_walk_meters {
+                let secs = (total_dist as f32 / walk_speed) as u32;
+                reachable.push((stop_idx as u32, secs, total_dist));
             }
         }
     }

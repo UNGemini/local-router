@@ -65,6 +65,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
     let max_walk = req.max_walk_distance.unwrap_or(DEFAULT_MAX_WALK);
     let max_transfers = req.max_transfers.unwrap_or(DEFAULT_MAX_TRANSFERS);
     let max_results = req.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
+    let walk_speed = parse_walk_speed(req.walking_speed.as_deref());
 
     // find stops reachable from origin by walking
     let origin_stops = walker::reachable_stops_from_coord(
@@ -73,6 +74,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         req.origin_lat as f32,
         req.origin_lon as f32,
         max_walk,
+        walk_speed,
     );
 
     // find stops reachable from destination by walking
@@ -82,6 +84,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         req.dest_lat as f32,
         req.dest_lon as f32,
         max_walk,
+        walk_speed,
     );
 
     if origin_stops.is_empty() || dest_stops.is_empty() {
@@ -406,4 +409,15 @@ fn lookup_fare(
         }
     }
     None
+}
+
+// parse walking speed string to m/s. accepts "slow", "normal", "fast" or a numeric m/s value
+fn parse_walk_speed(s: Option<&str>) -> f32 {
+    match s {
+        Some("slow") => 0.8,
+        Some("fast") => 1.6,
+        Some("normal") => walker::DEFAULT_WALK_SPEED_MPS,
+        Some(v) => v.parse::<f32>().unwrap_or(walker::DEFAULT_WALK_SPEED_MPS),
+        None => walker::DEFAULT_WALK_SPEED_MPS,
+    }
 }
