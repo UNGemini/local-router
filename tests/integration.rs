@@ -74,17 +74,137 @@ fn test_sf_embarcadero_to_civic() {
                     .get("distance_meters")
                     .and_then(|d| d.as_u64())
                     .unwrap_or(0);
+                let from = leg
+                    .get("from")
+                    .and_then(|f| f.get("address"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("?");
+                let to = leg
+                    .get("to")
+                    .and_then(|t| t.get("address"))
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("?");
                 println!(
-                    "  plan {} leg {} ({}): path_points={}, dist={}m",
+                    "  plan {} leg {} ({}): path_points={}, dist={}m, {} -> {}",
                     i,
                     j,
                     wt.as_str().unwrap_or("?"),
                     path_len,
-                    dist
+                    dist,
+                    from,
+                    to
                 );
             }
         }
     }
+}
+
+#[test]
+fn test_sf_walk_paths_complete() {
+    let router = match load_sf_router() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipping: sf data not found");
+            return;
+        }
+    };
+    // test multiple queries to find path failures
+    let queries = vec![
+        // mission -> wharf
+        ("37.758917,-122.414580", "37.808332,-122.417743"),
+        // sunset -> financial district
+        ("37.753611,-122.485000", "37.790000,-122.400000"),
+        // richmond -> soma
+        ("37.779500,-122.467000", "37.783000,-122.399000"),
+        // castro -> north beach
+        ("37.762200,-122.435000", "37.800500,-122.409000"),
+    ];
+    let mut egress_total = 0u32;
+    let mut egress_missing_path = 0u32;
+    let mut access_total = 0u32;
+    let mut access_missing_path = 0u32;
+    for (oi, (origin, dest)) in queries.iter().enumerate() {
+        let request = serde_json::json!({
+            "origin": origin,
+            "destination": dest,
+            "depart_at": "2026-03-09T09:00:00Z",
+            "max_results": 5
+        });
+        let result = router.plan(&request.to_string()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let plans = parsed["plans"].as_array().unwrap();
+        println!("query {}: {} plans", oi, plans.len());
+        for (i, plan) in plans.iter().enumerate() {
+            let dur = plan["duration_seconds"].as_u64().unwrap();
+            let legs = plan["legs"].as_array().unwrap();
+            println!("  plan {} ({}s = {} min):", i, dur, dur / 60);
+            for (j, leg) in legs.iter().enumerate() {
+                if let Some(wt) = leg.get("walk_type") {
+                    let wt_str = wt.as_str().unwrap_or("?");
+                    let path_len = leg
+                        .get("path")
+                        .and_then(|p| p.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    let dist = leg
+                        .get("distance_meters")
+                        .and_then(|d| d.as_u64())
+                        .unwrap_or(0);
+                    let from = leg
+                        .get("from")
+                        .and_then(|f| f.get("address"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("?");
+                    let to = leg
+                        .get("to")
+                        .and_then(|t| t.get("address"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("?");
+                    println!(
+                        "    leg {} ({}): {}pts, {}m, {} -> {}",
+                        j, wt_str, path_len, dist, from, to
+                    );
+                    if path_len <= 2 && dist > 20 {
+                        println!(
+                            "      ^ STRAIGHT LINE (only {} points for {}m)",
+                            path_len, dist
+                        );
+                    }
+                    if wt_str == "station_egress" {
+                        egress_total += 1;
+                        if path_len <= 2 && dist > 20 {
+                            egress_missing_path += 1;
+                        }
+                    }
+                    if wt_str == "station_access" {
+                        access_total += 1;
+                        if path_len <= 2 && dist > 20 {
+                            access_missing_path += 1;
+                        }
+                    }
+                } else if let Some(ro) = leg.get("route_options") {
+                    let name = ro[0]["route_name"].as_str().unwrap_or("?");
+                    let mode = ro[0]["mode"].as_str().unwrap_or("?");
+                    println!("    leg {} (transit): {} {}", j, mode, name);
+                }
+            }
+        }
+    }
+    println!(
+        "access paths: {}/{} have real geometry",
+        access_total - access_missing_path,
+        access_total
+    );
+    println!(
+        "egress paths: {}/{} have real geometry",
+        egress_total - egress_missing_path,
+        egress_total
+    );
+    assert!(
+        egress_missing_path == 0,
+        "{} egress walks missing real path geometry",
+        egress_missing_path
+    );
 }
 
 #[test]

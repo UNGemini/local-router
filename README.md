@@ -13,3 +13,7 @@ Wheels Router Nano is:
 - no bloat, but no code golf as well
 
 Maintained by Wheels Labs, a part of Wheels Softworks
+
+### Contributing
+- We welcome code contributions. however, ai slop pull request will be closed instantly.
+- if you did use AI in the process, read it yourself before submitting the PR. remove anything you don't need. make sure every line is correct, necessary, and as clean as it can be. because if you aren't willing to put in that time, why should we?

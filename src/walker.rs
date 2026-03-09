@@ -191,6 +191,7 @@ impl WalkReach {
     }
 
     // get the walk path to a stop (looks up the stop's walk_node_idx)
+    // for stops without a walk_node_idx, falls back to nearest graph node
     pub fn path_to_stop(
         &self,
         graph: &WalkGraph,
@@ -198,10 +199,17 @@ impl WalkReach {
         stop_idx: u32,
     ) -> Vec<(f32, f32)> {
         let stop = &stops[stop_idx as usize];
-        if stop.walk_node_idx == NOT_SET {
-            return vec![];
+        if stop.walk_node_idx != NOT_SET {
+            return self.path_to_node(graph, stop.walk_node_idx);
         }
-        self.path_to_node(graph, stop.walk_node_idx)
+        // stop has no walk graph node - find nearest graph node as fallback
+        if let Some(near) = nearest_node(graph, stop.lat, stop.lon) {
+            let path = self.path_to_node(graph, near);
+            if !path.is_empty() {
+                return path;
+            }
+        }
+        vec![]
     }
 }
 
@@ -234,10 +242,12 @@ pub fn walk_between(
     let extra_start = haversine(lat1, lon1, sn.lat, sn.lon) as u32;
     let extra_end = haversine(lat2, lon2, en.lat, en.lon) as u32;
 
-    let dijk = dijkstra(graph, start, max_dist, walk_speed);
+    // graph distance is typically 1.3-1.5x haversine, so search wider
+    let search_radius = max_dist + max_dist / 2;
+    let dijk = dijkstra(graph, start, search_radius, walk_speed);
     if let Some((dist_m, _)) = dijk.get(end) {
         let total = dist_m + extra_start + extra_end;
-        if total <= max_dist {
+        if total <= search_radius {
             let secs = (total as f32 / walk_speed) as u32;
             let mut path = vec![(lat1, lon1)];
             let graph_path = dijk.path_coords(graph, end);
@@ -263,16 +273,30 @@ pub fn walk_between_stops(
 ) -> Vec<(f32, f32)> {
     let from = &stops[from_idx as usize];
     let to = &stops[to_idx as usize];
-    if graph.nodes.is_empty() || from.walk_node_idx == NOT_SET || to.walk_node_idx == NOT_SET {
+    if graph.nodes.is_empty() {
         return vec![(from.lat, from.lon), (to.lat, to.lon)];
     }
+    // resolve walk graph nodes, falling back to nearest node if NOT_SET
+    let from_node = if from.walk_node_idx != NOT_SET {
+        Some(from.walk_node_idx)
+    } else {
+        nearest_node(graph, from.lat, from.lon)
+    };
+    let to_node = if to.walk_node_idx != NOT_SET {
+        Some(to.walk_node_idx)
+    } else {
+        nearest_node(graph, to.lat, to.lon)
+    };
+    let (Some(fn_idx), Some(tn_idx)) = (from_node, to_node) else {
+        return vec![(from.lat, from.lon), (to.lat, to.lon)];
+    };
     // short dijkstra between the two walk nodes (transfers are typically <500m)
-    let dijk = dijkstra(graph, from.walk_node_idx, 2000, walk_speed);
-    if dijk.dist[to.walk_node_idx as usize] == u32::MAX {
+    let dijk = dijkstra(graph, fn_idx, 2000, walk_speed);
+    if dijk.dist[tn_idx as usize] == u32::MAX {
         return vec![(from.lat, from.lon), (to.lat, to.lon)];
     }
     let mut path = vec![(from.lat, from.lon)];
-    path.extend_from_slice(&dijk.path_coords(graph, to.walk_node_idx));
+    path.extend_from_slice(&dijk.path_coords(graph, tn_idx));
     path.push((to.lat, to.lon));
     path
 }
