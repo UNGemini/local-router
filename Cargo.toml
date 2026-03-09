@@ -1,0 +1,26 @@
+[package]
+name = "wheels-router-nano"
+version = "0.1.0"
+edition = "2021"
+description = "a wasm-ready transit trip planner using raptor"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+capnp = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+
+[build-dependencies]
+capnpc = "0.20"
+
+[features]
+default = []
+wasm = ["wasm-bindgen"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
