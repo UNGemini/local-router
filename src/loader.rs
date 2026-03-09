@@ -13,6 +13,31 @@ fn hash_str(s: &str) -> u32 {
     h
 }
 
+// read packed u32 little-endian values from a Data blob
+fn unpack_u32_le(data: &[u8]) -> Vec<u32> {
+    let count = data.len() / 4;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = i * 4;
+        let v = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        out.push(v);
+    }
+    out
+}
+
+// read packed float32 lat/lon pairs from a Data blob
+fn unpack_geometry(data: &[u8]) -> Vec<(f32, f32)> {
+    let count = data.len() / 8;
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = i * 8;
+        let lat = f32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        let lon = f32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
+        out.push((lat, lon));
+    }
+    out
+}
+
 pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
     let reader = serialize::read_message_from_flat_slice(
         &mut &bytes[..],
@@ -88,17 +113,9 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
         });
     }
 
-    // stop times
-    let st_reader = root.get_stop_times()?;
-    let mut stop_times = Vec::with_capacity(st_reader.len() as usize);
-    for st in st_reader.iter() {
-        stop_times.push(StopTime {
-            arrival: st.get_arrival(),
-            departure: st.get_departure(),
-            pickup_type: st.get_pickup_type(),
-            drop_off_type: st.get_drop_off_type(),
-        });
-    }
+    // packed stop times
+    let arrivals = unpack_u32_le(root.get_stop_arrivals()?);
+    let departures = unpack_u32_le(root.get_stop_departures()?);
 
     // transfers
     let t_reader = root.get_transfers()?;
@@ -164,8 +181,12 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
         walk_edges.push(WalkEdge {
             to_node_idx: e.get_to_node_idx(),
             dist_meters: e.get_dist_meters(),
+            geometry_offset: e.get_geometry_offset(),
+            geometry_len: e.get_geometry_len(),
         });
     }
+    let geom_data = wg_reader.get_geometry()?;
+    let geometry = unpack_geometry(geom_data);
 
     Ok(TransitData {
         feed_id,
@@ -174,12 +195,14 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
         routes,
         trips,
         agencies,
-        stop_times,
+        arrivals,
+        departures,
         transfers,
         services,
         walk_graph: WalkGraph {
             nodes: walk_nodes,
             edges: walk_edges,
+            geometry,
         },
         fare_rules,
     })

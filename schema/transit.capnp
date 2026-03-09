@@ -15,10 +15,12 @@ struct TransitData {
   trips @4 :List(Trip);
   agencies @5 :List(Agency);
 
-  # flattened stop times array (nigiri-style)
+  # packed stop times as raw bytes (4 bytes per u32 little-endian)
   # each route references a contiguous slice: [stopTimesOffset .. stopTimesOffset + numStopTimes)
   # within that slice, times are grouped by trip, each group has route.numStops entries
-  stopTimes @6 :List(StopTime);
+  # arrival[i] = read_u32_le(stopArrivals, i*4), departure[i] = read_u32_le(stopDepartures, i*4)
+  stopArrivals @6 :Data;
+  stopDepartures @11 :Data;
 
   # pre-computed walking transfers between nearby stops
   transfers @7 :List(Transfer);
@@ -90,15 +92,6 @@ struct Trip {
   directionId @4 :UInt8;
 }
 
-struct StopTime {
-  # seconds since midnight, max_val = not set
-  arrival @0 :UInt32;
-  departure @1 :UInt32;
-  # pickup/dropoff type (0=regular, 1=none, 2=phone, 3=coordinate)
-  pickupType @2 :UInt8;
-  dropOffType @3 :UInt8;
-}
-
 struct Transfer {
   # index of target stop
   toStopIdx @0 :UInt32;
@@ -129,6 +122,10 @@ struct FareRule {
 struct WalkGraph {
   nodes @0 :List(WalkNode);
   edges @1 :List(WalkEdge);
+  # flat packed geometry array for compressed edges
+  # alternating float32 lat,lon pairs: [lat0,lon0,lat1,lon1,...]
+  # edges reference slices via geometryOffset + geometryLen
+  geometry @2 :Data;
 }
 
 struct WalkNode {
@@ -142,4 +139,8 @@ struct WalkNode {
 struct WalkEdge {
   toNodeIdx @0 :UInt32;
   distMeters @1 :UInt16;
+  # offset (in coord pairs, not bytes) into WalkGraph.geometry
+  geometryOffset @2 :UInt32;
+  # number of intermediate coordinate pairs
+  geometryLen @3 :UInt16;
 }

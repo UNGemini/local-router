@@ -260,8 +260,8 @@ fn journey_to_plan(
         for pos in rleg.board_stop_pos..=rleg.alight_stop_pos {
             let sidx = route.stop_idxs[pos as usize];
             let s = &data.stops[sidx as usize];
-            let arr = route.arrival_at(&data.stop_times, rleg.trip_num, pos as usize);
-            let dep = route.departure_at(&data.stop_times, rleg.trip_num, pos as usize);
+            let arr = route.arrival_at(&data.arrivals, rleg.trip_num, pos as usize);
+            let dep = route.departure_at(&data.departures, rleg.trip_num, pos as usize);
 
             let board_dep = rleg.board_time;
             let arr_offset = if arr != NOT_SET && arr >= board_dep {

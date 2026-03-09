@@ -86,26 +86,48 @@ impl DijkstraResult {
     }
 
     // reconstruct path from start to target as (lat, lon) coordinates
+    // includes intermediate geometry from compressed edges
     pub fn path_coords(&self, graph: &WalkGraph, target: u32) -> Vec<(f32, f32)> {
         if self.dist[target as usize] == u32::MAX {
             return vec![];
         }
-        let mut path = vec![target];
+        // build node sequence
+        let mut node_seq = vec![target];
         let mut cur = target;
         while cur != self.start {
             cur = self.parent[cur as usize];
             if cur == u32::MAX {
                 return vec![];
             }
-            path.push(cur);
+            node_seq.push(cur);
         }
-        path.reverse();
-        path.iter()
-            .map(|&ni| {
-                let n = &graph.nodes[ni as usize];
-                (n.lat, n.lon)
-            })
-            .collect()
+        node_seq.reverse();
+
+        // build coordinate path with edge geometry
+        let mut path = Vec::new();
+        for i in 0..node_seq.len() {
+            let ni = node_seq[i];
+            let n = &graph.nodes[ni as usize];
+            path.push((n.lat, n.lon));
+            // if there's a next node, find the edge and insert geometry
+            if i + 1 < node_seq.len() {
+                let next_ni = node_seq[i + 1];
+                let wn = &graph.nodes[ni as usize];
+                let edges_start = wn.edges_offset as usize;
+                let edges_end = edges_start + wn.num_edges as usize;
+                for e in &graph.edges[edges_start..edges_end] {
+                    if e.to_node_idx == next_ni && e.geometry_len > 0 {
+                        let start = e.geometry_offset as usize;
+                        let end = start + e.geometry_len as usize;
+                        if end <= graph.geometry.len() {
+                            path.extend_from_slice(&graph.geometry[start..end]);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        path
     }
 }
 

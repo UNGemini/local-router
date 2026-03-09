@@ -136,7 +136,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
 
                 // try to alight here if we're on a trip
                 if let Some(trip_num) = current_trip {
-                    let arr = route.arrival_at(&data.stop_times, trip_num, pos);
+                    let arr = route.arrival_at(&data.arrivals, trip_num, pos);
                     if arr != NOT_SET && arr < best[stop_idx] {
                         best[stop_idx] = arr;
                         best_per_round[k][stop_idx] = arr;
@@ -160,7 +160,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
                 // binary search for earliest trip departing after prev_arr
                 let trip_num = earliest_trip(data, route, pos, prev_arr, query.service_day);
                 if let Some(tn) = trip_num {
-                    let dep = route.departure_at(&data.stop_times, tn, pos);
+                    let dep = route.departure_at(&data.departures, tn, pos);
                     if current_trip.is_none() || dep < board_time {
                         current_trip = Some(tn);
                         board_stop_pos = pos as u32;
@@ -233,7 +233,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
                     p.board_stop_pos,
                 );
                 let actual_alight_time = data.routes[p.route_idx as usize].arrival_at(
-                    &data.stop_times,
+                    &data.arrivals,
                     p.trip_num,
                     alight_pos as usize,
                 );
@@ -317,7 +317,7 @@ fn earliest_trip(
     let mut hi = num_trips;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        let dep = route.departure_at(&data.stop_times, mid, stop_pos);
+        let dep = route.departure_at(&data.departures, mid, stop_pos);
         if dep < min_dep {
             lo = mid + 1;
         } else {
@@ -327,7 +327,7 @@ fn earliest_trip(
 
     // linear scan from lo to find first trip that runs on this service day
     for t in lo..num_trips {
-        let dep = route.departure_at(&data.stop_times, t, stop_pos);
+        let dep = route.departure_at(&data.departures, t, stop_pos);
         if dep == NOT_SET {
             continue;
         }

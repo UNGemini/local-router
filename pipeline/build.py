@@ -11,6 +11,7 @@ import csv
 import io
 import math
 import os
+import struct
 import sys
 import zipfile
 from collections import defaultdict
@@ -567,8 +568,13 @@ def compute_transfers(gtfs):
 # osm walk graph
 # ---------------------------------------------------------------------------
 
-def build_walk_graph(osm_path):
-    """extract pedestrian-walkable graph from osm. returns (nodes, edges_dict)."""
+def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
+    """
+    extract pedestrian-walkable graph from osm, pruned to within
+    max_walk_radius meters of any transit stop.
+    stop_coords: list of (lat, lon) for all stops.
+    returns (nodes, edges_dict).
+    """
     import osmium
 
     WALKABLE = {
@@ -622,7 +628,151 @@ def build_walk_graph(osm_path):
             edge_list[ai].append((bi, dist))
             edge_list[bi].append((ai, dist))
 
+    # prune nodes far from any transit stop
+    if stop_coords:
+        grid_size = 0.005  # ~550m grid cells
+        stop_grid = defaultdict(list)
+        for slat, slon in stop_coords:
+            gx, gy = int(slon / grid_size), int(slat / grid_size)
+            stop_grid[(gx, gy)].append((slat, slon))
+
+        radius_cells = int(math.ceil(max_walk_radius / 550.0))
+        keep = set()
+        for ni, (nlat, nlon) in enumerate(nodes):
+            gx, gy = int(nlon / grid_size), int(nlat / grid_size)
+            found = False
+            for dx in range(-radius_cells, radius_cells + 1):
+                if found:
+                    break
+                for dy in range(-radius_cells, radius_cells + 1):
+                    for slat, slon in stop_grid.get((gx + dx, gy + dy), []):
+                        if haversine(nlat, nlon, slat, slon) <= max_walk_radius:
+                            found = True
+                            break
+                    if found:
+                        break
+            if found:
+                keep.add(ni)
+
+        if len(keep) < len(nodes):
+            # reindex to only kept nodes
+            old_to_new = {}
+            new_nodes = []
+            for old_i in sorted(keep):
+                old_to_new[old_i] = len(new_nodes)
+                new_nodes.append(nodes[old_i])
+            new_edges = defaultdict(list)
+            for ni in keep:
+                for (to, dist) in edge_list.get(ni, []):
+                    if to in keep:
+                        new_edges[old_to_new[ni]].append((old_to_new[to], dist))
+            nodes = new_nodes
+            edge_list = new_edges
+
     return nodes, edge_list
+
+
+def compress_walk_graph(nodes, edge_list, protected_nodes):
+    """
+    contract degree-2 nodes to reduce graph size.
+    protected_nodes is a set of node indices that must not be removed
+    (e.g. nodes linked to transit stops).
+    returns (new_nodes, new_edge_list) where edges may have geometry.
+    new_edge_list values are (to_idx, dist, geometry) where geometry is
+    a list of (lat, lon) for intermediate points (empty if direct edge).
+    """
+    # build adjacency as sets (dedup parallel edges)
+    n = len(nodes)
+    adj = defaultdict(set)
+    # also track distances per edge
+    edge_dist = {}
+    for ni in range(n):
+        for (to, dist) in edge_list.get(ni, []):
+            adj[ni].add(to)
+            key = (min(ni, to), max(ni, to))
+            if key not in edge_dist or dist < edge_dist[key]:
+                edge_dist[key] = dist
+
+    # identify contractable nodes: degree 2, not protected
+    contractable = set()
+    for ni in range(n):
+        if len(adj[ni]) == 2 and ni not in protected_nodes:
+            contractable.add(ni)
+
+    # trace chains of degree-2 nodes
+    visited = set()
+    chains = []  # list of (endpoints, chain_nodes, total_dist)
+
+    for start in range(n):
+        if start in contractable or start in visited:
+            continue
+        # start is a junction/endpoint/protected node
+        for neighbor in adj[start]:
+            if neighbor not in contractable or neighbor in visited:
+                continue
+            # trace the chain from start through degree-2 nodes
+            chain = [start, neighbor]
+            visited.add(neighbor)
+            cur = neighbor
+            prev = start
+            total = edge_dist[(min(prev, cur), max(prev, cur))]
+            while True:
+                # cur is degree-2 (contractable), find next
+                nexts = adj[cur] - {prev}
+                if not nexts:
+                    break
+                nxt = next(iter(nexts))
+                key = (min(cur, nxt), max(cur, nxt))
+                total += edge_dist.get(key, 0)
+                prev = cur
+                cur = nxt
+                chain.append(cur)
+                if cur not in contractable:
+                    break
+                visited.add(cur)
+            chains.append((chain, total))
+
+    # build the new graph: only keep non-contractable nodes
+    keep = [i for i in range(n) if i not in contractable]
+    old_to_new = {}
+    for new_i, old_i in enumerate(keep):
+        old_to_new[old_i] = new_i
+    new_nodes = [nodes[i] for i in keep]
+
+    # add original edges between kept nodes (non-chain edges)
+    new_edge_list = defaultdict(list)
+    chain_endpoints = set()
+    for chain, _ in chains:
+        chain_endpoints.add((chain[0], chain[-1]))
+        chain_endpoints.add((chain[-1], chain[0]))
+
+    for ni in keep:
+        for to in adj[ni]:
+            if to in contractable:
+                continue
+            # direct edge between two kept nodes (not part of a chain)
+            if (ni, to) in chain_endpoints:
+                continue
+            new_ni = old_to_new[ni]
+            new_to = old_to_new[to]
+            key = (min(ni, to), max(ni, to))
+            dist = edge_dist.get(key, 0)
+            new_edge_list[new_ni].append((new_to, dist, []))
+
+    # add chain edges with geometry
+    for chain, total_dist in chains:
+        a, b = chain[0], chain[-1]
+        if a not in old_to_new or b not in old_to_new:
+            continue
+        new_a = old_to_new[a]
+        new_b = old_to_new[b]
+        # geometry = intermediate nodes (excluding endpoints)
+        geom = [nodes[i] for i in chain[1:-1]]
+        dist = min(total_dist, MAX_U16)
+        new_edge_list[new_a].append((new_b, dist, geom))
+        new_edge_list[new_b].append((new_a, dist, list(reversed(geom))))
+
+    return new_nodes, new_edge_list
 
 
 def link_stops_to_walk_graph(stops, walk_nodes):
@@ -759,12 +909,13 @@ def build_capnp(gtfs, patterns, services, svc_id_map, transfers, walk_nodes, wal
                     "drop_off_type": int(st.get("drop_off_type", "0") or "0"),
                 })
 
-    st_list = msg.init("stopTimes", len(all_stop_times))
-    for i, st in enumerate(all_stop_times):
-        st_list[i].arrival = st["arrival"]
-        st_list[i].departure = st["departure"]
-        st_list[i].pickupType = st["pickup_type"]
-        st_list[i].dropOffType = st["drop_off_type"]
+    st_arrivals = b""
+    st_departures = b""
+    for st in all_stop_times:
+        st_arrivals += struct.pack("<I", st["arrival"])
+        st_departures += struct.pack("<I", st["departure"])
+    msg.stopArrivals = st_arrivals
+    msg.stopDepartures = st_departures
 
     # transfers
     tf_list = msg.init("transfers", len(transfers))
@@ -827,11 +978,27 @@ def build_capnp(gtfs, patterns, services, svc_id_map, transfers, walk_nodes, wal
     wg = msg.init("walkGraph")
     flat_edges = []
     edge_offsets = []
+    flat_geometry = b""  # packed float32 lat,lon pairs
+    geom_pair_offset = 0  # current offset in coord pairs
     for ni in range(len(walk_nodes)):
         offset = len(flat_edges)
         node_edges = walk_edges.get(ni, [])
         edge_offsets.append((offset, len(node_edges)))
-        flat_edges.extend(node_edges)
+        for edge in node_edges:
+            if len(edge) == 3:
+                to_idx, dist, geom = edge
+            else:
+                to_idx, dist = edge
+                geom = []
+            g_off = geom_pair_offset
+            g_len = len(geom)
+            if geom:
+                for glat, glon in geom:
+                    flat_geometry += struct.pack("<ff", glat, glon)
+                geom_pair_offset += g_len
+            flat_edges.append((to_idx, dist, g_off, g_len))
+
+    wg.geometry = flat_geometry
 
     wn_list = wg.init("nodes", len(walk_nodes))
     for i, (lat, lon) in enumerate(walk_nodes):
@@ -842,9 +1009,11 @@ def build_capnp(gtfs, patterns, services, svc_id_map, transfers, walk_nodes, wal
         wn_list[i].numEdges = min(num, MAX_U16)
 
     we_list = wg.init("edges", len(flat_edges))
-    for i, (to_idx, dist) in enumerate(flat_edges):
+    for i, (to_idx, dist, g_off, g_len) in enumerate(flat_edges):
         we_list[i].toNodeIdx = to_idx
         we_list[i].distMeters = dist
+        we_list[i].geometryOffset = g_off
+        we_list[i].geometryLen = min(g_len, MAX_U16)
 
     return msg
 
@@ -884,7 +1053,8 @@ def main():
     walk_nodes, walk_edges = [], {}
     if args.osm:
         print("reading osm pedestrian graph...")
-        walk_nodes, walk_edges = build_walk_graph(args.osm)
+        stop_coords = [(get_lat(s), get_lon(s)) for s in gtfs.stops if get_location_type(s) in (0, 1, 2)]
+        walk_nodes, walk_edges = build_walk_graph(args.osm, stop_coords)
         print(f"  {len(walk_nodes)} walk nodes, {sum(len(v) for v in walk_edges.values())} walk edges")
     else:
         print("no osm file provided, skipping walk graph")
@@ -893,6 +1063,23 @@ def main():
     stop_walk_links = link_stops_to_walk_graph(gtfs.stops, walk_nodes)
     linked = sum(1 for x in stop_walk_links if x != MAX_U32)
     print(f"  {linked}/{len(gtfs.stops)} stops linked")
+
+    if walk_nodes:
+        print("compressing walk graph...")
+        protected = set(x for x in stop_walk_links if x != MAX_U32)
+        raw_nodes = len(walk_nodes)
+        raw_edges = sum(len(v) for v in walk_edges.values())
+        walk_nodes, walk_edges = compress_walk_graph(walk_nodes, walk_edges, protected)
+        new_edges = sum(len(v) for v in walk_edges.values())
+        print(f"  {raw_nodes} -> {len(walk_nodes)} nodes, {raw_edges} -> {new_edges} edges")
+        # remap stop_walk_links to new node indices
+        old_to_new = {}
+        # rebuild old_to_new by checking which old indices were kept
+        # the compress function keeps nodes not in contractable set
+        # we need to re-link stops after compression
+        stop_walk_links = link_stops_to_walk_graph(gtfs.stops, walk_nodes)
+        linked = sum(1 for x in stop_walk_links if x != MAX_U32)
+        print(f"  {linked}/{len(gtfs.stops)} stops linked after reindex")
 
     print("assembling capnp message...")
     msg = build_capnp(gtfs, patterns, services, svc_id_map, transfers, walk_nodes, walk_edges, stop_walk_links)
