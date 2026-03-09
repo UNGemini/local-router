@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wheels-router-pipeline"
+version = "0.1.0"
+description = "gtfs + osm to .wheelsrouter converter"
+requires-python = ">=3.10"
+dependencies = [
+    "pycapnp>=2.0.0",
+    "osmium>=3.7.0",
+]

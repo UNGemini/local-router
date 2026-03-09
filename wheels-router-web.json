@@ -1,0 +1,958 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Wheels Router API",
+    "description": "Wheels Router is a free, unlimited, provider-neutral public API service for multi-modal trip planning in Hong Kong.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://engine.justusewheels.com",
+      "description": "Wheels Router endpoint"
+    }
+  ],
+  "paths": {
+    "/v1/plan": {
+      "get": {
+        "summary": "Plan a trip",
+        "description": "Calculate trip plans between an origin and a destination using various transit modes.",
+        "operationId": "planTrip",
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "query",
+            "description": "Starting point of the trip. Can be \"lat,lon\" coordinates or a \"stop:ID\".",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "22.297432,114.237296"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "description": "Destination of the trip. Can be \"lat,lon\" coordinates or a \"stop:ID\".",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "22.280843,114.180558"
+            }
+          },
+          {
+            "name": "depart_at",
+            "in": "query",
+            "description": "Desired departure time in ISO 8601 format. Cannot be used with `arrive_by`.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "arrive_by",
+            "in": "query",
+            "description": "Desired arrival time in ISO 8601 format. Cannot be used with `depart_at`.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "modes",
+            "in": "query",
+            "description": "Comma-separated list of allowed transit modes (e.g., \"mtr,bus,ferry\").",
+            "schema": {
+              "type": "string",
+              "example": "mtr,bus"
+            }
+          },
+          {
+            "name": "exclude_modes",
+            "in": "query",
+            "description": "Comma-separated list of excluded transit modes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exclude_routes",
+            "in": "query",
+            "description": "Comma-separated list of route IDs to exclude.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "exclude_stops",
+            "in": "query",
+            "description": "Comma-separated list of stop IDs to exclude.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "max_transfers",
+            "in": "query",
+            "description": "Maximum number of transfers allowed.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10,
+              "default": 3
+            }
+          },
+          {
+            "name": "max_results",
+            "in": "query",
+            "description": "Maximum number of trip plans to return.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 15
+            }
+          },
+          {
+            "name": "walking_speed",
+            "in": "query",
+            "description": "Walking speed preference.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "slow",
+                "normal",
+                "fast"
+              ],
+              "default": "normal"
+            }
+          },
+          {
+            "name": "max_walk_distance",
+            "in": "query",
+            "description": "Maximum walking distance in meters.",
+            "schema": {
+              "type": "integer",
+              "maximum": 5000
+            }
+          },
+          {
+            "name": "locale",
+            "in": "query",
+            "description": "Language code for response text (e.g., \"en\", \"zh\", \"zh-Hant\").",
+            "schema": {
+              "type": "string",
+              "default": "en"
+            }
+          },
+          {
+            "name": "modifier",
+            "in": "query",
+            "description": "Optimization modifier for the trip plan.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "less-walking",
+                "less-transfer"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful trip plan response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanResponse"
+                },
+                "example": {
+                  "plans": [
+                    {
+                      "duration_seconds": 1680,
+                      "duration_seconds_min": 1758,
+                      "duration_seconds_max": 1758,
+                      "start_time": "2025-11-25T09:09:00Z",
+                      "legs": [
+                        {
+                          "type": "walk",
+                          "walk_type": "station_access",
+                          "from": {
+                            "location": {
+                              "lat": 22.2974326856354,
+                              "lon": 114.237296021475
+                            },
+                            "address": "START"
+                          },
+                          "to": {
+                            "location": {
+                              "lat": 22.297157,
+                              "lon": 114.237556
+                            },
+                            "address": "Exit A2",
+                            "id": "mtr:yat:exit:A2",
+                            "entrance": "Exit A2"
+                          },
+                          "duration_seconds": 240,
+                          "distance_meters": 151,
+                          "polyline": "kr|oi@urn{xEDE|f@{]??sTtO"
+                        },
+                        {
+                          "type": "walk",
+                          "walk_type": "station_transfer",
+                          "from": {
+                            "location": {
+                              "lat": 22.297157,
+                              "lon": 114.237556
+                            },
+                            "address": "Exit A2",
+                            "id": "mtr:yat:exit:A2",
+                            "entrance": "Exit A2"
+                          },
+                          "to": {
+                            "location": {
+                              "lat": 22.297777,
+                              "lon": 114.237122
+                            },
+                            "address": "Yau Tong",
+                            "id": "mtr:yat:platform:4",
+                            "stop_id": "MTR-PLATFORM-YAT-4",
+                            "platform": "Platform 4"
+                          },
+                          "duration_seconds": 141,
+                          "distance_meters": 0,
+                          "polyline": ""
+                        },
+                        {
+                          "type": "transit",
+                          "route_options": [
+                            {
+                              "route_id": "MTR-TKL",
+                              "trip_id": "MTR-TKL-DT",
+                              "route_name": "Tseung Kwan O Line",
+                              "route_long_name": "Tseung Kwan O Line (Po Lam - North Point)",
+                              "route_short_name": "TKL",
+                              "headsign": "North Point",
+                              "agency": {
+                                "id": "MTRR",
+                                "name": "MTR Rail",
+                                "url": "https://www.mtr.com.hk"
+                              },
+                              "mode": "mtr",
+                              "duration_seconds": 240,
+                              "start_time": "2025-11-25T09:13:00Z",
+                              "color": "003da5",
+                              "text_color": "ffffff",
+                              "fare": {
+                                "base_fare": 1060,
+                                "final_fare": 1060,
+                                "currency": "HKD"
+                              },
+                              "stops": [
+                                {
+                                  "location": {
+                                    "lat": 22.297777,
+                                    "lon": 114.237122
+                                  },
+                                  "id": "mtr:yat:platform:4",
+                                  "stop_id": "MTR-PLATFORM-YAT-4",
+                                  "stop_name": "Yau Tong",
+                                  "platform": "Platform 4",
+                                  "departure_offset_minutes": 0
+                                },
+                                {
+                                  "location": {
+                                    "lat": 22.288,
+                                    "lon": 114.208534
+                                  },
+                                  "id": "mtr:qub:platform:4",
+                                  "stop_id": "MTR-PLATFORM-QUB-4",
+                                  "stop_name": "Quarry Bay",
+                                  "platform": "Platform 4",
+                                  "arrival_offset_minutes": 4
+                                }
+                              ],
+                              "from": {
+                                "location": {
+                                  "lat": 22.297777,
+                                  "lon": 114.237122
+                                },
+                                "id": "mtr:yat:platform:4",
+                                "stop_id": "MTR-PLATFORM-YAT-4",
+                                "stop_name": "Yau Tong",
+                                "platform": "Platform 4",
+                                "departure_offset_minutes": 0
+                              },
+                              "to": {
+                                "location": {
+                                  "lat": 22.288,
+                                  "lon": 114.208534
+                                },
+                                "id": "mtr:qub:platform:4",
+                                "stop_id": "MTR-PLATFORM-QUB-4",
+                                "stop_name": "Quarry Bay",
+                                "platform": "Platform 4",
+                                "arrival_offset_minutes": 4
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "type": "walk",
+                          "walk_type": "station_transfer",
+                          "from": {
+                            "location": {
+                              "lat": 22.288,
+                              "lon": 114.208534
+                            },
+                            "address": "Quarry Bay",
+                            "id": "mtr:qub:platform:4",
+                            "stop_id": "MTR-PLATFORM-QUB-4",
+                            "platform": "Platform 4"
+                          },
+                          "to": {
+                            "location": {
+                              "lat": 22.288477,
+                              "lon": 114.208466
+                            },
+                            "address": "Quarry Bay",
+                            "id": "mtr:qub:platform:2",
+                            "stop_id": "MTR-PLATFORM-QUB-2",
+                            "platform": "Platform 2"
+                          },
+                          "duration_seconds": 113,
+                          "distance_meters": 50
+                        },
+                        {
+                          "type": "transit",
+                          "route_options": [
+                            {
+                              "route_id": "MTR-ISL",
+                              "trip_id": "MTR-ISL-DT",
+                              "route_name": "Island Line",
+                              "route_long_name": "Island Line (Chai Wan - Kennedy Town)",
+                              "route_short_name": "ISL",
+                              "headsign": "Kennedy Town",
+                              "agency": {
+                                "id": "MTRR",
+                                "name": "MTR Rail",
+                                "url": "https://www.mtr.com.hk"
+                              },
+                              "mode": "mtr",
+                              "duration_seconds": 540,
+                              "start_time": "2025-11-25T09:19:00Z",
+                              "color": "003da5",
+                              "text_color": "ffffff",
+                              "fare": {
+                                "base_fare": 590,
+                                "final_fare": 590,
+                                "currency": "HKD"
+                              },
+                              "stops": [
+                                {
+                                  "location": {
+                                    "lat": 22.288477,
+                                    "lon": 114.208466
+                                  },
+                                  "id": "mtr:qub:platform:2",
+                                  "stop_id": "MTR-PLATFORM-QUB-2",
+                                  "stop_name": "Quarry Bay",
+                                  "platform": "Platform 2",
+                                  "departure_offset_minutes": 0
+                                },
+                                {
+                                  "location": {
+                                    "lat": 22.291145,
+                                    "lon": 114.200363
+                                  },
+                                  "id": "mtr:nop:platform:2",
+                                  "stop_id\"": "MTR-PLATFORM-NOP-2",
+                                  "stop_name": "North Point",
+                                  "platform": "Platform 2",
+                                  "arrival_offset_minutes": 2,
+                                  "departure_offset_minutes": 2
+                                },
+                                {
+                                  "location": {
+                                    "lat": 22.287834,
+                                    "lon": 114.193878
+                                  },
+                                  "id": "mtr:foh:platform:2",
+                                  "stop_id": "MTR-PLATFORM-FOH-2",
+                                  "stop_name": "Fortress Hill",
+                                  "platform": "Platform 2",
+                                  "arrival_offset_minutes": 4,
+                                  "departure_offset_minutes": 4
+                                },
+                                {
+                                  "location": {
+                                    "lat": 22.282259,
+                                    "lon": 114.19191
+                                  },
+                                  "id": "mtr:tih:platform:2",
+                                  "stop_id": "MTR-PLATFORM-TIH-2",
+                                  "stop_name": "Tin Hau",
+                                  "platform": "Platform 2",
+                                  "arrival_offset_minutes": 6,
+                                  "departure_offset_minutes": 6
+                                },
+                                {
+                                  "location": {
+                                    "lat": 22.280163,
+                                    "lon": 114.184326
+                                  },
+                                  "id": "mtr:cab:platform:2",
+                                  "stop_id": "MTR-PLATFORM-CAB-2",
+                                  "stop_name": "Causeway Bay",
+                                  "platform": "Platform 2",
+                                  "arrival_offset_minutes": 9
+                                }
+                              ],
+                              "from": {
+                                "location": {
+                                  "lat": 22.288477,
+                                  "lon": 114.208466
+                                },
+                                "id": "mtr:qub:platform:2",
+                                "stop_id": "MTR-PLATFORM-QUB-2",
+                                "stop_name": "Quarry Bay",
+                                "platform": "Platform 2",
+                                "departure_offset_minutes": 0
+                              },
+                              "to": {
+                                "location": {
+                                  "lat": 22.280163,
+                                  "lon": 114.184326
+                                },
+                                "id": "mtr:cab:platform:2",
+                                "stop_id": "MTR-PLATFORM-CAB-2",
+                                "stop_name": "Causeway Bay",
+                                "platform": "Platform 2",
+                                "arrival_offset_minutes": 9
+                              }
+                            }
+                          ]
+                        },
+                        {
+                          "type": "walk",
+                          "walk_type": "station_transfer",
+                          "from": {
+                            "location": {
+                              "lat": 22.280163,
+                              "lon": 114.184326
+                            },
+                            "address": "Causeway Bay",
+                            "id": "mtr:cab:platform:2",
+                            "stop_id": "MTR-PLATFORM-CAB-2",
+                            "platform": "Platform 2"
+                          },
+                          "to": {
+                            "location": {
+                              "lat": 22.278545,
+                              "lon": 114.182503
+                            },
+                            "address": "Exit A",
+                            "id": "mtr:cab:exit:A",
+                            "entrance": "Exit A"
+                          },
+                          "duration_seconds": 424,
+                          "distance_meters": 0,
+                          "polyline": ""
+                        },
+                        {
+                          "type": "walk",
+                          "walk_type": "station_access",
+                          "from": {
+                            "location": {
+                              "lat": 22.278545,
+                              "lon": 114.182503
+                            },
+                            "address": "Exit A",
+                            "id": "mtr:cab:exit:A",
+                            "entrance": "Exit A"
+                          },
+                          "to": {
+                            "location": {
+                              "lat": 22.2808439521927,
+                              "lon": 114.180558478701
+                            },
+                            "address": "END"
+                          },
+                          "duration_seconds": 60,
+                          "polyline": ""
+                        }
+                      ],
+                      "fares_min": 1650,
+                      "fares_max": 1650,
+                      "currency": "HKD"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (invalid parameters)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PlanResponse": {
+        "type": "object",
+        "properties": {
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Plan"
+            }
+          },
+          "debug": {
+            "type": "object",
+            "description": "Debug information (if enabled)"
+          }
+        },
+        "required": [
+          "plans"
+        ]
+      },
+      "Plan": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {
+            "type": "integer",
+            "description": "Total duration of the trip in seconds."
+          },
+          "duration_seconds_min": {
+            "type": "integer",
+            "description": "Minimum duration considering fastest route options."
+          },
+          "duration_seconds_max": {
+            "type": "integer",
+            "description": "Maximum duration considering slowest route options."
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Departure time of the trip."
+          },
+          "legs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Leg"
+            }
+          },
+          "fares_min": {
+            "type": "integer",
+            "description": "Minimum total fare in smallest currency unit (e.g., cents)."
+          },
+          "fares_max": {
+            "type": "integer",
+            "description": "Maximum total fare in smallest currency unit."
+          },
+          "currency": {
+            "type": "string",
+            "description": "Currency code (e.g., HKD)."
+          }
+        },
+        "required": [
+          "duration_seconds",
+          "start_time",
+          "legs"
+        ]
+      },
+      "Leg": {
+        "type": "object",
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "walk": "#/components/schemas/WalkLeg",
+            "transit": "#/components/schemas/TransitLeg",
+            "wait": "#/components/schemas/WaitLeg",
+            "station_transfer": "#/components/schemas/StationTransferLeg"
+          }
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/WalkLeg"
+          },
+          {
+            "$ref": "#/components/schemas/TransitLeg"
+          },
+          {
+            "$ref": "#/components/schemas/WaitLeg"
+          },
+          {
+            "$ref": "#/components/schemas/StationTransferLeg"
+          }
+        ]
+      },
+      "WalkLeg": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "walk"
+            ]
+          },
+          "walk_type": {
+            "type": "string",
+            "enum": [
+              "station_access",
+              "station_transfer"
+            ],
+            "nullable": true
+          },
+          "from": {
+            "$ref": "#/components/schemas/Location"
+          },
+          "to": {
+            "$ref": "#/components/schemas/Location"
+          },
+          "duration_seconds": {
+            "type": "integer"
+          },
+          "distance_meters": {
+            "type": "integer"
+          },
+          "polyline": {
+            "type": "string",
+            "description": "Encoded polyline string."
+          },
+          "instructions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "duration_seconds"
+        ]
+      },
+      "TransitLeg": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "transit"
+            ]
+          },
+          "route_options": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteOption"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "route_options"
+        ]
+      },
+      "WaitLeg": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "wait"
+            ]
+          },
+          "duration_seconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "type",
+          "duration_seconds"
+        ]
+      },
+      "StationTransferLeg": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "station_transfer"
+            ]
+          },
+          "from_platform": {
+            "type": "string"
+          },
+          "to_platform": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "type": "integer"
+          },
+          "distance_meters": {
+            "type": "integer"
+          },
+          "instructions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "duration_seconds",
+          "distance_meters"
+        ]
+      },
+      "RouteOption": {
+        "type": "object",
+        "properties": {
+          "route_id": {
+            "type": "string"
+          },
+          "trip_id": {
+            "type": "string"
+          },
+          "route_name": {
+            "type": "string"
+          },
+          "route_long_name": {
+            "type": "string"
+          },
+          "route_short_name": {
+            "type": "string"
+          },
+          "headsign": {
+            "type": "string"
+          },
+          "agency": {
+            "$ref": "#/components/schemas/Agency"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "type": "integer"
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "color": {
+            "type": "string"
+          },
+          "text_color": {
+            "type": "string"
+          },
+          "fare": {
+            "$ref": "#/components/schemas/Fare"
+          },
+          "stops": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Stop"
+            }
+          },
+          "from": {
+            "$ref": "#/components/schemas/Stop"
+          },
+          "to": {
+            "$ref": "#/components/schemas/Stop"
+          }
+        },
+        "required": [
+          "route_id",
+          "route_name",
+          "agency",
+          "mode",
+          "duration_seconds",
+          "stops",
+          "from",
+          "to"
+        ]
+      },
+      "Location": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "$ref": "#/components/schemas/LocationPoint"
+          },
+          "address": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "stop_id": {
+            "type": "string"
+          },
+          "entrance": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "location"
+        ]
+      },
+      "Stop": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "$ref": "#/components/schemas/LocationPoint"
+          },
+          "id": {
+            "type": "string"
+          },
+          "stop_id": {
+            "type": "string"
+          },
+          "stop_name": {
+            "type": "string"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "exit": {
+            "type": "string"
+          },
+          "access_via": {
+            "type": "string"
+          },
+          "arrival_offset_minutes": {
+            "type": "integer"
+          },
+          "departure_offset_minutes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "location"
+        ]
+      },
+      "LocationPoint": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "format": "double"
+          },
+          "lon": {
+            "type": "number",
+            "format": "double"
+          }
+        },
+        "required": [
+          "lat",
+          "lon"
+        ]
+      },
+      "Agency": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "Fare": {
+        "type": "object",
+        "properties": {
+          "base_fare": {
+            "type": "integer"
+          },
+          "discount": {
+            "$ref": "#/components/schemas/FareDiscount"
+          },
+          "final_fare": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_fare",
+          "currency"
+        ]
+      },
+      "FareDiscount": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          },
+          "rules": {
+            "$ref": "#/components/schemas/FareDiscountRules"
+          }
+        },
+        "required": [
+          "amount",
+          "type"
+        ]
+      },
+      "FareDiscountRules": {
+        "type": "object",
+        "properties": {
+          "requires_previous_route": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "time_window_seconds": {
+            "type": "integer"
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ]
+      }
+    }
+  }
+}
