@@ -49,6 +49,8 @@ pub struct WalkLeg {
     pub distance_meters: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub polyline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<LatLon>>,
 }
 
 #[derive(Serialize, Clone, Debug)]

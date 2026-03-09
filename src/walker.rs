@@ -10,14 +10,6 @@ const EARTH_RADIUS: f32 = 6_371_000.0;
 // grid cell size for spatial indexing (~111m per 0.001 degree)
 const GRID_CELL: f32 = 0.001;
 
-// result of a walk search: reachable node index + distance in meters + time in seconds
-#[derive(Debug, Clone, Copy)]
-pub struct WalkResult {
-    pub node_idx: u32,
-    pub dist_meters: u32,
-    pub walk_seconds: u32,
-}
-
 // haversine distance in meters
 pub fn haversine(lat1: f32, lon1: f32, lat2: f32, lon2: f32) -> f32 {
     let rlat1 = lat1.to_radians();
@@ -37,8 +29,6 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     if graph.nodes.is_empty() {
         return None;
     }
-    // build grid index on the fly (for large graphs this should be precomputed,
-    // but for typical transit-area extracts this is fast enough)
     let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
     for (i, n) in graph.nodes.iter().enumerate() {
         grid.entry(grid_key(n.lat, n.lon))
@@ -49,7 +39,6 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     let (gy, gx) = grid_key(lat, lon);
     let mut best_idx = 0u32;
     let mut best_dist = f32::MAX;
-    // search expanding radius: first try 3x3, then 5x5, then 7x7
     for radius in [1i32, 2, 3] {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -66,7 +55,7 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
             }
         }
         if best_dist < (radius as f32) * 111.0 {
-            break; // found something within the search radius
+            break;
         }
     }
     if best_dist > 1000.0 {
@@ -76,16 +65,56 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     }
 }
 
-// dijkstra from a single source node, up to a max distance
-// returns map from node_idx -> (dist_meters, walk_seconds) for all reachable nodes
-pub fn dijkstra(
-    graph: &WalkGraph,
+// dijkstra result with parent pointers for path reconstruction
+pub struct DijkstraResult {
+    pub dist: Vec<u32>,
+    parent: Vec<u32>,
     start: u32,
-    max_dist: u32,
     walk_speed: f32,
-) -> HashMap<u32, (u32, u32)> {
+}
+
+impl DijkstraResult {
+    // get (dist_meters, walk_seconds) for a node, or None if unreachable
+    pub fn get(&self, node: u32) -> Option<(u32, u32)> {
+        let d = self.dist[node as usize];
+        if d == u32::MAX {
+            None
+        } else {
+            let secs = (d as f32 / self.walk_speed) as u32;
+            Some((d, secs))
+        }
+    }
+
+    // reconstruct path from start to target as (lat, lon) coordinates
+    pub fn path_coords(&self, graph: &WalkGraph, target: u32) -> Vec<(f32, f32)> {
+        if self.dist[target as usize] == u32::MAX {
+            return vec![];
+        }
+        let mut path = vec![target];
+        let mut cur = target;
+        while cur != self.start {
+            cur = self.parent[cur as usize];
+            if cur == u32::MAX {
+                return vec![];
+            }
+            path.push(cur);
+        }
+        path.reverse();
+        path.iter()
+            .map(|&ni| {
+                let n = &graph.nodes[ni as usize];
+                (n.lat, n.lon)
+            })
+            .collect()
+    }
+}
+
+// dijkstra from a single source node, up to a max distance
+// returns DijkstraResult with distances and parent pointers
+pub fn dijkstra(graph: &WalkGraph, start: u32, max_dist: u32, walk_speed: f32) -> DijkstraResult {
     let n = graph.nodes.len();
     let mut dist = vec![u32::MAX; n];
+    let mut parent = vec![u32::MAX; n];
     let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
 
     dist[start as usize] = 0;
@@ -105,23 +134,104 @@ pub fn dijkstra(
             let new_dist = d + e.dist_meters as u32;
             if new_dist < dist[e.to_node_idx as usize] && new_dist <= max_dist {
                 dist[e.to_node_idx as usize] = new_dist;
+                parent[e.to_node_idx as usize] = node;
                 heap.push(Reverse((new_dist, e.to_node_idx)));
             }
         }
     }
 
-    let mut results = HashMap::new();
-    for (i, &d) in dist.iter().enumerate() {
-        if d < u32::MAX {
-            let secs = (d as f32 / walk_speed) as u32;
-            results.insert(i as u32, (d, secs));
+    DijkstraResult {
+        dist,
+        parent,
+        start,
+        walk_speed,
+    }
+}
+
+// result of walking from a coordinate: reachable stops + dijkstra state for path extraction
+pub struct WalkReach {
+    // (stop_idx, walk_seconds, dist_meters) for each reachable stop
+    pub stops: Vec<(u32, u32, u32)>,
+    // the dijkstra result, if a walk graph was used (None = straight-line fallback)
+    dijk: Option<DijkstraResult>,
+    // the nearest graph node to the source coordinate
+    #[allow(dead_code)]
+    start_node: Option<u32>,
+}
+
+impl WalkReach {
+    // get the walk path coordinates from the source to a specific graph node
+    pub fn path_to_node(&self, graph: &WalkGraph, node_idx: u32) -> Vec<(f32, f32)> {
+        match &self.dijk {
+            Some(d) => d.path_coords(graph, node_idx),
+            None => vec![],
         }
     }
-    results
+
+    // get the walk path to a stop (looks up the stop's walk_node_idx)
+    pub fn path_to_stop(
+        &self,
+        graph: &WalkGraph,
+        stops: &[crate::data::Stop],
+        stop_idx: u32,
+    ) -> Vec<(f32, f32)> {
+        let stop = &stops[stop_idx as usize];
+        if stop.walk_node_idx == NOT_SET {
+            return vec![];
+        }
+        self.path_to_node(graph, stop.walk_node_idx)
+    }
+}
+
+// compute walking distance and path between two coordinates via the walk graph
+// returns (dist_meters, walk_seconds, path_coords) or None if not reachable
+pub fn walk_between(
+    graph: &WalkGraph,
+    lat1: f32,
+    lon1: f32,
+    lat2: f32,
+    lon2: f32,
+    max_dist: u32,
+    walk_speed: f32,
+) -> Option<(u32, u32, Vec<(f32, f32)>)> {
+    let straight = haversine(lat1, lon1, lat2, lon2) as u32;
+    if straight > max_dist {
+        return None;
+    }
+
+    if graph.nodes.is_empty() {
+        let secs = (straight as f32 / walk_speed) as u32;
+        return Some((straight, secs, vec![(lat1, lon1), (lat2, lon2)]));
+    }
+
+    let start = nearest_node(graph, lat1, lon1)?;
+    let end = nearest_node(graph, lat2, lon2)?;
+
+    let sn = &graph.nodes[start as usize];
+    let en = &graph.nodes[end as usize];
+    let extra_start = haversine(lat1, lon1, sn.lat, sn.lon) as u32;
+    let extra_end = haversine(lat2, lon2, en.lat, en.lon) as u32;
+
+    let dijk = dijkstra(graph, start, max_dist, walk_speed);
+    if let Some((dist_m, _)) = dijk.get(end) {
+        let total = dist_m + extra_start + extra_end;
+        if total <= max_dist {
+            let secs = (total as f32 / walk_speed) as u32;
+            let mut path = vec![(lat1, lon1)];
+            let graph_path = dijk.path_coords(graph, end);
+            path.extend_from_slice(&graph_path);
+            path.push((lat2, lon2));
+            return Some((total, secs, path));
+        }
+    }
+
+    // graph didn't connect them; fall back to straight-line
+    let secs = (straight as f32 / walk_speed) as u32;
+    Some((straight, secs, vec![(lat1, lon1), (lat2, lon2)]))
 }
 
 // find stops reachable by walking from a lat/lon coordinate
-// returns (stop_idx, walk_seconds, dist_meters) pairs
+// returns WalkReach with reachable stops and path reconstruction capability
 pub fn reachable_stops_from_coord(
     graph: &WalkGraph,
     stops: &[crate::data::Stop],
@@ -129,10 +239,10 @@ pub fn reachable_stops_from_coord(
     lon: f32,
     max_walk_meters: u32,
     walk_speed: f32,
-) -> Vec<(u32, u32, u32)> {
+) -> WalkReach {
     // if no walk graph, fall back to straight-line distance to stops
     if graph.nodes.is_empty() {
-        return stops
+        let stops_vec = stops
             .iter()
             .enumerate()
             .filter(|(_, s)| s.location_type == 0)
@@ -146,13 +256,17 @@ pub fn reachable_stops_from_coord(
                 }
             })
             .collect();
+        return WalkReach {
+            stops: stops_vec,
+            dijk: None,
+            start_node: None,
+        };
     }
 
     let start = match nearest_node(graph, lat, lon) {
         Some(n) => n,
         None => {
-            // fall back to straight-line
-            return stops
+            let stops_vec = stops
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| s.location_type == 0)
@@ -166,23 +280,25 @@ pub fn reachable_stops_from_coord(
                     }
                 })
                 .collect();
+            return WalkReach {
+                stops: stops_vec,
+                dijk: None,
+                start_node: None,
+            };
         }
     };
 
-    // add distance from coord to nearest node
     let sn = &graph.nodes[start as usize];
     let extra_dist = haversine(lat, lon, sn.lat, sn.lon) as u32;
 
-    let walk_map = dijkstra(graph, start, max_walk_meters, walk_speed);
+    let dijk = dijkstra(graph, start, max_walk_meters, walk_speed);
 
-    // map walk nodes back to stops using hashmap lookup
     let mut reachable = Vec::new();
     for (stop_idx, stop) in stops.iter().enumerate() {
         if stop.location_type != 0 {
             continue;
         }
         if stop.walk_node_idx == NOT_SET {
-            // try straight-line as fallback
             let d = haversine(lat, lon, stop.lat, stop.lon) as u32;
             if d <= max_walk_meters {
                 let secs = (d as f32 / walk_speed) as u32;
@@ -190,8 +306,7 @@ pub fn reachable_stops_from_coord(
             }
             continue;
         }
-        // O(1) hashmap lookup instead of linear scan
-        if let Some(&(dist_m, _)) = walk_map.get(&stop.walk_node_idx) {
+        if let Some((dist_m, _)) = dijk.get(stop.walk_node_idx) {
             let total_dist = dist_m + extra_dist;
             if total_dist <= max_walk_meters {
                 let secs = (total_dist as f32 / walk_speed) as u32;
@@ -199,5 +314,10 @@ pub fn reachable_stops_from_coord(
             }
         }
     }
-    reachable
+
+    WalkReach {
+        stops: reachable,
+        dijk: Some(dijk),
+        start_node: Some(start),
+    }
 }

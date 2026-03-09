@@ -7,7 +7,8 @@ use crate::raptor::{self, RaptorJourney, RaptorQuery};
 use crate::types::*;
 use crate::walker;
 
-const DEFAULT_MAX_WALK: u32 = 1000; // meters
+const DEFAULT_MAX_WALK: u32 = 1000; // meters for access/egress
+const DEFAULT_MAX_WALK_ONLY: u32 = 5000; // meters for walk-only trips
 const DEFAULT_MAX_TRANSFERS: u32 = 3;
 const DEFAULT_MAX_RESULTS: usize = 15;
 
@@ -38,13 +39,27 @@ fn secs_to_iso(base_date: &str, secs: u32) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     let s = secs % 60;
-    // handle times past midnight
     if h >= 24 {
-        // simplified: just wrap around
         format!("{}T{:02}:{:02}:{:02}Z", base_date, h - 24, m, s)
     } else {
         format!("{}T{:02}:{:02}:{:02}Z", base_date, h, m, s)
     }
+}
+
+// convert a list of (lat, lon) to a vec of LatLon for json output
+fn coords_to_path(coords: &[(f32, f32)]) -> Option<Vec<LatLon>> {
+    if coords.len() < 2 {
+        return None;
+    }
+    Some(
+        coords
+            .iter()
+            .map(|&(lat, lon)| LatLon {
+                lat: lat as f64,
+                lon: lon as f64,
+            })
+            .collect(),
+    )
 }
 
 pub struct PlanRequest {
@@ -67,8 +82,8 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
     let max_results = req.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
     let walk_speed = parse_walk_speed(req.walking_speed.as_deref());
 
-    // find stops reachable from origin by walking
-    let origin_stops = walker::reachable_stops_from_coord(
+    // find stops reachable from origin/destination by walking
+    let origin_reach = walker::reachable_stops_from_coord(
         &data.walk_graph,
         &data.stops,
         req.origin_lat as f32,
@@ -76,9 +91,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         max_walk,
         walk_speed,
     );
-
-    // find stops reachable from destination by walking
-    let dest_stops = walker::reachable_stops_from_coord(
+    let dest_reach = walker::reachable_stops_from_coord(
         &data.walk_graph,
         &data.stops,
         req.dest_lat as f32,
@@ -87,49 +100,113 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         walk_speed,
     );
 
-    if origin_stops.is_empty() || dest_stops.is_empty() {
-        return PlanResponse { plans: vec![] };
-    }
-
-    // run raptor
-    let query = RaptorQuery {
-        origin_stops: origin_stops.iter().map(|&(s, w, _)| (s, w)).collect(),
-        dest_stops: dest_stops.iter().map(|&(s, w, _)| (s, w)).collect(),
-        departure_time: req.departure_time,
-        service_day: req.service_day,
-        max_transfers,
-        max_results,
+    // run raptor if we have reachable stops on both sides
+    let mut plans: Vec<Plan> = if !origin_reach.stops.is_empty() && !dest_reach.stops.is_empty() {
+        let query = RaptorQuery {
+            origin_stops: origin_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect(),
+            dest_stops: dest_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect(),
+            departure_time: req.departure_time,
+            service_day: req.service_day,
+            max_transfers,
+            max_results,
+        };
+        raptor::run(data, &query)
+            .iter()
+            .filter_map(|j| journey_to_plan(data, j, req, &origin_reach, &dest_reach))
+            .collect()
+    } else {
+        vec![]
     };
 
-    let journeys = raptor::run(data, &query);
+    // always try a walk-only plan - walking is a first-class mode
+    if let Some(walk_plan) = walk_only_plan(data, req, walk_speed) {
+        plans.push(walk_plan);
+    }
 
-    // convert to api response
-    let plans = journeys
-        .iter()
-        .filter_map(|j| journey_to_plan(data, j, req, &origin_stops, &dest_stops))
-        .collect();
+    // sort by duration
+    plans.sort_by_key(|p| p.duration_seconds);
+    plans.truncate(max_results);
 
     PlanResponse { plans }
+}
+
+fn walk_only_plan(data: &TransitData, req: &PlanRequest, walk_speed: f32) -> Option<Plan> {
+    let (dist, secs, path) = walker::walk_between(
+        &data.walk_graph,
+        req.origin_lat as f32,
+        req.origin_lon as f32,
+        req.dest_lat as f32,
+        req.dest_lon as f32,
+        DEFAULT_MAX_WALK_ONLY,
+        walk_speed,
+    )?;
+
+    let start_time = secs_to_iso(&req.date_str, req.departure_time);
+    Some(Plan {
+        duration_seconds: secs,
+        duration_seconds_min: Some(secs),
+        duration_seconds_max: Some(secs),
+        start_time,
+        legs: vec![Leg::Walk(WalkLeg {
+            walk_type: Some("walk".to_string()),
+            from: Some(Location {
+                location: LatLon {
+                    lat: req.origin_lat,
+                    lon: req.origin_lon,
+                },
+                address: Some("START".to_string()),
+                id: None,
+                stop_id: None,
+                entrance: None,
+                platform: None,
+            }),
+            to: Some(Location {
+                location: LatLon {
+                    lat: req.dest_lat,
+                    lon: req.dest_lon,
+                },
+                address: Some("END".to_string()),
+                id: None,
+                stop_id: None,
+                entrance: None,
+                platform: None,
+            }),
+            duration_seconds: secs,
+            distance_meters: Some(dist),
+            polyline: None,
+            path: coords_to_path(&path),
+        })],
+        fares_min: None,
+        fares_max: None,
+        currency: None,
+    })
 }
 
 fn journey_to_plan(
     data: &TransitData,
     journey: &RaptorJourney,
     req: &PlanRequest,
-    origin_stops: &[(u32, u32, u32)],
-    dest_stops: &[(u32, u32, u32)],
+    origin_reach: &walker::WalkReach,
+    dest_reach: &walker::WalkReach,
 ) -> Option<Plan> {
     let mut legs = Vec::new();
     let date = &req.date_str;
 
-    // access walk leg
+    // access walk leg (origin -> first boarding stop)
     if journey.access_walk_secs > 0 {
         let stop = &data.stops[journey.access_stop_idx as usize];
-        let access_dist = origin_stops
+        let access_dist = origin_reach
+            .stops
             .iter()
             .find(|(s, _, _)| *s == journey.access_stop_idx)
             .map(|(_, _, d)| *d)
             .unwrap_or(0);
+
+        let mut path_coords =
+            origin_reach.path_to_stop(&data.walk_graph, &data.stops, journey.access_stop_idx);
+        // prepend origin coord, append stop coord
+        path_coords.insert(0, (req.origin_lat as f32, req.origin_lon as f32));
+        path_coords.push((stop.lat, stop.lon));
 
         legs.push(Leg::Walk(WalkLeg {
             walk_type: Some("station_access".to_string()),
@@ -162,6 +239,7 @@ fn journey_to_plan(
             duration_seconds: journey.access_walk_secs,
             distance_meters: Some(access_dist),
             polyline: None,
+            path: coords_to_path(&path_coords),
         }));
     }
 
@@ -278,13 +356,12 @@ fn journey_to_plan(
             to: to_info,
         };
 
-        // if there's a transfer walk between this and the previous transit leg
+        // transfer walk between consecutive transit legs
         if i > 0 {
             let prev = &journey.legs[i - 1];
             let prev_route = &data.routes[prev.route_idx as usize];
             let prev_alight_idx = prev_route.stop_idxs[prev.alight_stop_pos as usize];
             if prev_alight_idx != board_stop_idx {
-                // there was a transfer walk
                 let prev_stop = &data.stops[prev_alight_idx as usize];
                 let transfer_time = rleg.board_time.saturating_sub(prev.alight_time);
                 let dist =
@@ -325,6 +402,7 @@ fn journey_to_plan(
                     duration_seconds: transfer_time,
                     distance_meters: Some(dist),
                     polyline: None,
+                    path: None, // transfer walks are short, no graph path needed
                 }));
             }
         }
@@ -334,14 +412,24 @@ fn journey_to_plan(
         }));
     }
 
-    // egress walk leg
+    // egress walk leg (last alighting stop -> destination)
     if journey.egress_walk_secs > 0 {
         let stop = &data.stops[journey.egress_stop_idx as usize];
-        let egress_dist = dest_stops
+        let egress_dist = dest_reach
+            .stops
             .iter()
             .find(|(s, _, _)| *s == journey.egress_stop_idx)
             .map(|(_, _, d)| *d)
             .unwrap_or(0);
+
+        // dest_reach runs dijkstra FROM destination, so the path is dest->stop.
+        // we need stop->dest, so reverse it.
+        let mut path_coords =
+            dest_reach.path_to_stop(&data.walk_graph, &data.stops, journey.egress_stop_idx);
+        path_coords.reverse();
+        // prepend stop coord, append dest coord
+        path_coords.insert(0, (stop.lat, stop.lon));
+        path_coords.push((req.dest_lat as f32, req.dest_lon as f32));
 
         legs.push(Leg::Walk(WalkLeg {
             walk_type: Some("station_access".to_string()),
@@ -374,6 +462,7 @@ fn journey_to_plan(
             duration_seconds: journey.egress_walk_secs,
             distance_meters: Some(egress_dist),
             polyline: None,
+            path: coords_to_path(&path_coords),
         }));
     }
 
@@ -398,13 +487,12 @@ fn lookup_fare(
     _from_stop: &crate::data::Stop,
     _to_stop: &crate::data::Stop,
 ) -> Option<FareInfo> {
-    // simple fare lookup: find first matching fare rule for this route
     for fr in &data.fare_rules {
         if fr.route_idx == route_idx || fr.route_idx == NOT_SET {
             return Some(FareInfo {
                 base_fare: fr.price,
                 final_fare: Some(fr.price),
-                currency: "USD".to_string(), // simplified; real impl would store currency
+                currency: "USD".to_string(),
             });
         }
     }
