@@ -25,6 +25,9 @@
                 --accent: #47d4a0;
                 --accent2: #2fb382;
                 --walk: #f0a850;
+                --walk-access: #f0a850;
+                --walk-egress: #e87070;
+                --walk-transfer: #c090e0;
                 --transit: #47d4a0;
                 --error: #e85454;
                 --radius: 10px;
@@ -312,6 +315,14 @@
                 background: rgba(240, 168, 80, 0.15);
                 color: var(--walk);
             }
+            .leg-pill.walk-egress {
+                background: rgba(232, 112, 112, 0.15);
+                color: var(--walk-egress);
+            }
+            .leg-pill.walk-transfer {
+                background: rgba(192, 144, 224, 0.15);
+                color: var(--walk-transfer);
+            }
             .leg-pill.transit {
                 color: #fff;
             }
@@ -345,6 +356,15 @@
             }
             .leg-detail .leg-type.walk-type {
                 color: var(--walk);
+            }
+            .leg-detail .leg-type.walk-access {
+                color: var(--walk-access);
+            }
+            .leg-detail .leg-type.walk-egress {
+                color: var(--walk-egress);
+            }
+            .leg-detail .leg-type.walk-transfer {
+                color: var(--walk-transfer);
             }
             .leg-detail .leg-type.transit-type {
                 color: var(--transit);
@@ -674,7 +694,11 @@
                             const m =
                                 leg.distance_meters ||
                                 Math.round(leg.duration_seconds * 1.2);
-                            html += `<span class="leg-pill walk">${m}m walk</span>`;
+                            const wt = leg.walk_type || "walk";
+                            const pillClass = wt === "station_egress" ? "walk-egress"
+                                : wt === "station_transfer" ? "walk-transfer"
+                                : "walk";
+                            html += `<span class="leg-pill ${pillClass}">${m}m walk</span>`;
                         } else if (leg.type === "transit") {
                             const ro = leg.route_options[0];
                             const bg = ro.color ? `#${ro.color}` : "#47d4a0";
@@ -690,6 +714,13 @@
                     p.legs.forEach((leg) => {
                         if (leg.type === "walk") {
                             const wt = leg.walk_type || "walk";
+                            const label = wt === "station_access" ? "walk to stop"
+                                : wt === "station_egress" ? "walk from stop"
+                                : wt === "station_transfer" ? "transfer walk"
+                                : "walk";
+                            const colorClass = wt === "station_egress" ? "egress"
+                                : wt === "station_transfer" ? "transfer"
+                                : "access";
                             const m =
                                 leg.distance_meters ||
                                 Math.round(leg.duration_seconds * 1.2);
@@ -699,7 +730,7 @@
                             const toName =
                                 leg.to?.address || leg.to?.stop_id || "";
                             html += `<div class="leg-detail">
-          <div class="leg-type walk-type">${wt}</div>
+          <div class="leg-type walk-type walk-${colorClass}">${label}</div>
           <div class="leg-info">${fromName} &rarr; ${toName}<br>${m}m, ~${s} min</div>
         </div>`;
                         } else if (leg.type === "transit") {
@@ -742,6 +773,12 @@
             function drawPlanOnMap(plan) {
                 if (!plan) return;
                 const allCoords = [];
+                const walkStyles = {
+                    station_access: { color: "#f0a850", weight: 3, dashArray: "6,6", opacity: 0.8 },
+                    station_egress: { color: "#e87070", weight: 3, dashArray: "6,6", opacity: 0.8 },
+                    station_transfer: { color: "#c090e0", weight: 3, dashArray: "4,4", opacity: 0.85 },
+                    walk: { color: "#f0a850", weight: 3, dashArray: "6,6", opacity: 0.8 },
+                };
                 plan.legs.forEach((leg) => {
                     if (leg.type === "walk") {
                         const coords = [];
@@ -762,12 +799,9 @@
                             }
                         }
                         if (coords.length >= 2) {
-                            const line = L.polyline(coords, {
-                                color: "#f0a850",
-                                weight: 3,
-                                dashArray: "6,6",
-                                opacity: 0.8,
-                            }).addTo(map);
+                            const wt = leg.walk_type || "walk";
+                            const style = walkStyles[wt] || walkStyles.walk;
+                            const line = L.polyline(coords, style).addTo(map);
                             routeLines.push(line);
                             allCoords.push(...coords);
                         }
