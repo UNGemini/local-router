@@ -20,6 +20,14 @@ capnpc = "0.20"
 default = []
 wasm = ["wasm-bindgen"]
 
+[[bench]]
+name = "query"
+harness = false
+
+[[bench]]
+name = "validate"
+harness = false
+
 [profile.release]
 opt-level = "s"
 lto = true
