@@ -39,10 +39,9 @@ fn unpack_geometry(data: &[u8]) -> Vec<(f32, f32)> {
 }
 
 pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
-    let reader = serialize::read_message_from_flat_slice(
-        &mut &bytes[..],
-        capnp::message::ReaderOptions::new(),
-    )?;
+    let mut opts = capnp::message::ReaderOptions::new();
+    opts.traversal_limit_in_words(None); // unlimited traversal for large data files
+    let reader = serialize::read_message_from_flat_slice(&mut &bytes[..], opts)?;
     let root = reader.get_root::<transit_data::Reader>()?;
 
     let feed_id = root.get_feed_id()?.to_string()?;

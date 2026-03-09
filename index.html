@@ -835,7 +835,7 @@
                     await init();
 
                     loadText.textContent = "loading transit data...";
-                    const resp = await fetch("data/marin.wheelsrouter");
+                    const resp = await fetch("data/sf.wheelsrouter");
                     if (!resp.ok)
                         throw new Error(`failed to load data: ${resp.status}`);
                     const buf = new Uint8Array(await resp.arrayBuffer());

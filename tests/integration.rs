@@ -8,6 +8,60 @@ fn load_test_router() -> Router {
     Router::load(&bytes).expect("failed to load transit data")
 }
 
+fn load_sf_router() -> Option<Router> {
+    let path = "data/sf.wheelsrouter";
+    let bytes = std::fs::read(path).ok()?;
+    Some(Router::load(&bytes).expect("failed to load sf data"))
+}
+
+#[test]
+fn test_sf_embarcadero_to_civic() {
+    let router = match load_sf_router() {
+        Some(r) => r,
+        None => {
+            eprintln!("skipping: sf data not found");
+            return;
+        }
+    };
+    // embarcadero area -> civic center area
+    let request = serde_json::json!({
+        "origin": "37.793557,-122.397823",
+        "destination": "37.788942,-122.417393",
+        "depart_at": "2026-03-09T10:00:00Z",
+        "walking_speed": "normal",
+        "max_results": 5
+    });
+    let result = router.plan(&request.to_string()).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+    let plans = parsed["plans"].as_array().unwrap();
+    println!("sf embarcadero->civic: {} plans", plans.len());
+    for (i, plan) in plans.iter().enumerate() {
+        let dur = plan["duration_seconds"].as_u64().unwrap();
+        let legs = plan["legs"].as_array().unwrap();
+        let modes: Vec<&str> = legs
+            .iter()
+            .map(|l| {
+                if l.get("route_options").is_some() {
+                    "transit"
+                } else {
+                    "walk"
+                }
+            })
+            .collect();
+        println!(
+            "  plan {}: {}s ({} min), legs: {:?}",
+            i,
+            dur,
+            dur / 60,
+            modes
+        );
+    }
+    assert!(
+        !plans.is_empty(),
+        "expected at least a walk-only plan for 1.7km trip"
+    );
+}
+
 #[test]
 fn test_load_data() {
     let router = load_test_router();
