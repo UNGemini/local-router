@@ -11,6 +11,8 @@ const DEFAULT_MAX_WALK: u32 = 1000; // meters for access/egress
 const DEFAULT_MAX_WALK_ONLY: u32 = 5000; // meters for walk-only trips
 const DEFAULT_MAX_TRANSFERS: u32 = 3;
 const DEFAULT_MAX_RESULTS: usize = 15;
+const RANGE_WINDOW_SECS: u32 = 3600; // search up to 60 min after requested departure
+const RANGE_STEP_SECS: u32 = 300; // 5 minute steps
 
 // convert gtfs route_type to a mode string
 fn route_type_to_mode(rt: u8) -> &'static str {
@@ -100,23 +102,61 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         walk_speed,
     );
 
-    // run raptor if we have reachable stops on both sides
-    let mut plans: Vec<Plan> = if !origin_reach.stops.is_empty() && !dest_reach.stops.is_empty() {
-        let query = RaptorQuery {
-            origin_stops: origin_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect(),
-            dest_stops: dest_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect(),
-            departure_time: req.departure_time,
-            service_day: req.service_day,
-            max_transfers,
-            max_results,
-        };
-        raptor::run(data, &query)
-            .iter()
-            .filter_map(|j| journey_to_plan(data, j, req, &origin_reach, &dest_reach, walk_speed))
-            .collect()
-    } else {
-        vec![]
-    };
+    // run raptor at multiple departure times (range-raptor) for diverse plans
+    let mut journeys: Vec<RaptorJourney> = Vec::new();
+    if !origin_reach.stops.is_empty() && !dest_reach.stops.is_empty() {
+        let origin_stops: Vec<(u32, u32)> =
+            origin_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect();
+        let dest_stops: Vec<(u32, u32)> =
+            dest_reach.stops.iter().map(|&(s, w, _)| (s, w)).collect();
+
+        let mut dep = req.departure_time;
+        let end_dep = req.departure_time + RANGE_WINDOW_SECS;
+        while dep <= end_dep {
+            let query = RaptorQuery {
+                origin_stops: origin_stops.clone(),
+                dest_stops: dest_stops.clone(),
+                departure_time: dep,
+                service_day: req.service_day,
+                max_transfers,
+                max_results,
+            };
+            let batch = raptor::run(data, &query);
+            journeys.extend(batch);
+            dep += RANGE_STEP_SECS;
+            // stop early if we already have plenty of candidates
+            if journeys.len() >= max_results * 3 {
+                break;
+            }
+        }
+    }
+
+    // deduplicate: exact same trips = same plan; same route pattern = keep only earliest
+    journeys.sort_by_key(|j| j.departure_time);
+    journeys.dedup_by(|a, b| trip_seq_eq(data, a, b));
+    // for same route pattern, keep only the earliest departure
+    let mut pattern_filtered: Vec<RaptorJourney> = Vec::new();
+    for j in journeys {
+        if !pattern_filtered.iter().any(|f| same_route_pattern(f, &j)) {
+            pattern_filtered.push(j);
+        }
+    }
+    // pareto-filter: remove plans dominated on both departure and arrival
+    pattern_filtered.sort_by_key(|j| j.arrival_time);
+    let mut filtered = Vec::new();
+    for j in &pattern_filtered {
+        let dominated = filtered.iter().any(|f: &&RaptorJourney| {
+            f.departure_time >= j.departure_time && f.arrival_time <= j.arrival_time
+        });
+        if !dominated {
+            filtered.push(j);
+        }
+    }
+
+    let mut plans: Vec<Plan> = filtered
+        .iter()
+        .filter_map(|j| journey_to_plan(data, j, req, &origin_reach, &dest_reach, walk_speed))
+        .collect();
 
     // always try a walk-only plan - walking is a first-class mode
     if let Some(walk_plan) = walk_only_plan(data, req, walk_speed) {
@@ -128,6 +168,34 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
     plans.truncate(max_results);
 
     PlanResponse { plans }
+}
+
+// check if two journeys use the same sequence of trips (for deduplication)
+fn trip_seq_eq(_data: &TransitData, a: &RaptorJourney, b: &RaptorJourney) -> bool {
+    if a.legs.len() != b.legs.len() {
+        return false;
+    }
+    a.legs.iter().zip(b.legs.iter()).all(|(la, lb)| {
+        la.route_idx == lb.route_idx
+            && la.trip_num == lb.trip_num
+            && la.board_stop_pos == lb.board_stop_pos
+            && la.alight_stop_pos == lb.alight_stop_pos
+    })
+}
+
+// check if two journeys use the same route pattern (same routes, same stops, but maybe different trips)
+fn same_route_pattern(a: &RaptorJourney, b: &RaptorJourney) -> bool {
+    if a.legs.len() != b.legs.len()
+        || a.access_stop_idx != b.access_stop_idx
+        || a.egress_stop_idx != b.egress_stop_idx
+    {
+        return false;
+    }
+    a.legs.iter().zip(b.legs.iter()).all(|(la, lb)| {
+        la.route_idx == lb.route_idx
+            && la.board_stop_pos == lb.board_stop_pos
+            && la.alight_stop_pos == lb.alight_stop_pos
+    })
 }
 
 fn walk_only_plan(data: &TransitData, req: &PlanRequest, walk_speed: f32) -> Option<Plan> {
