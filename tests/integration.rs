@@ -60,6 +60,31 @@ fn test_sf_embarcadero_to_civic() {
         !plans.is_empty(),
         "expected at least a walk-only plan for 1.7km trip"
     );
+    // check path geometry on walk legs
+    for (i, plan) in plans.iter().enumerate() {
+        let legs = plan["legs"].as_array().unwrap();
+        for (j, leg) in legs.iter().enumerate() {
+            if let Some(wt) = leg.get("walk_type") {
+                let path = leg.get("path");
+                let path_len = path
+                    .and_then(|p| p.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let dist = leg
+                    .get("distance_meters")
+                    .and_then(|d| d.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "  plan {} leg {} ({}): path_points={}, dist={}m",
+                    i,
+                    j,
+                    wt.as_str().unwrap_or("?"),
+                    path_len,
+                    dist
+                );
+            }
+        }
+    }
 }
 
 #[test]

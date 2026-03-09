@@ -252,6 +252,31 @@ pub fn walk_between(
     Some((straight, secs, vec![(lat1, lon1), (lat2, lon2)]))
 }
 
+// walk between two stops using the walk graph, returns path coordinates
+// used for transfer walks between consecutive transit legs
+pub fn walk_between_stops(
+    graph: &WalkGraph,
+    stops: &[crate::data::Stop],
+    from_idx: u32,
+    to_idx: u32,
+    walk_speed: f32,
+) -> Vec<(f32, f32)> {
+    let from = &stops[from_idx as usize];
+    let to = &stops[to_idx as usize];
+    if graph.nodes.is_empty() || from.walk_node_idx == NOT_SET || to.walk_node_idx == NOT_SET {
+        return vec![(from.lat, from.lon), (to.lat, to.lon)];
+    }
+    // short dijkstra between the two walk nodes (transfers are typically <500m)
+    let dijk = dijkstra(graph, from.walk_node_idx, 2000, walk_speed);
+    if dijk.dist[to.walk_node_idx as usize] == u32::MAX {
+        return vec![(from.lat, from.lon), (to.lat, to.lon)];
+    }
+    let mut path = vec![(from.lat, from.lon)];
+    path.extend_from_slice(&dijk.path_coords(graph, to.walk_node_idx));
+    path.push((to.lat, to.lon));
+    path
+}
+
 // find stops reachable by walking from a lat/lon coordinate
 // returns WalkReach with reachable stops and path reconstruction capability
 pub fn reachable_stops_from_coord(

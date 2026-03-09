@@ -112,7 +112,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
         };
         raptor::run(data, &query)
             .iter()
-            .filter_map(|j| journey_to_plan(data, j, req, &origin_reach, &dest_reach))
+            .filter_map(|j| journey_to_plan(data, j, req, &origin_reach, &dest_reach, walk_speed))
             .collect()
     } else {
         vec![]
@@ -188,6 +188,7 @@ fn journey_to_plan(
     req: &PlanRequest,
     origin_reach: &walker::WalkReach,
     dest_reach: &walker::WalkReach,
+    walk_speed: f32,
 ) -> Option<Plan> {
     let mut legs = Vec::new();
     let date = &req.date_str;
@@ -367,6 +368,14 @@ fn journey_to_plan(
                 let dist =
                     walker::haversine(prev_stop.lat, prev_stop.lon, board_stop.lat, board_stop.lon)
                         as u32;
+                // route the transfer walk through the osm walk graph
+                let path_coords = walker::walk_between_stops(
+                    &data.walk_graph,
+                    &data.stops,
+                    prev_alight_idx,
+                    board_stop_idx,
+                    walk_speed,
+                );
                 legs.push(Leg::Walk(WalkLeg {
                     walk_type: Some("station_transfer".to_string()),
                     from: Some(Location {
@@ -402,7 +411,7 @@ fn journey_to_plan(
                     duration_seconds: transfer_time,
                     distance_meters: Some(dist),
                     polyline: None,
-                    path: None, // transfer walks are short, no graph path needed
+                    path: coords_to_path(&path_coords),
                 }));
             }
         }
@@ -432,7 +441,7 @@ fn journey_to_plan(
         path_coords.push((req.dest_lat as f32, req.dest_lon as f32));
 
         legs.push(Leg::Walk(WalkLeg {
-            walk_type: Some("station_access".to_string()),
+            walk_type: Some("station_egress".to_string()),
             from: Some(Location {
                 location: LatLon {
                     lat: stop.lat as f64,
