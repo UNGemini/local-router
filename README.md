@@ -91,5 +91,5 @@ const plans = router.plan({
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/wlabs.png">
   <source media="(prefers-color-scheme: light)" srcset="images/wlabs.png">
-  <img alt="Wheels Labs" src="images/wlabs.png" width="70">
+  <img alt="Wheels Labs" src="images/wlabs.png" width="110">
 </picture>
