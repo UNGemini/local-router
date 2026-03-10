@@ -576,17 +576,25 @@ def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
     """
     import osmium
 
-    WALKABLE = {
-        "footway", "pedestrian", "path", "steps", "living_street",
-        "residential", "service", "tertiary", "secondary", "primary",
-        "trunk", "unclassified", "track", "cycleway",
+    # pedestrian-priority ways: used as-is (penalty = 1x)
+    PEDESTRIAN_PRIORITY = {
+        "footway", "pedestrian", "path", "steps", "living_street", "cycleway",
     }
+    # road-class ways: walkable but penalised to steer routing onto footpaths
+    ROAD_CLASS = {
+        "residential", "service", "tertiary", "secondary", "primary",
+        "trunk", "unclassified", "track",
+    }
+    WALKABLE = PEDESTRIAN_PRIORITY | ROAD_CLASS
+    # road edges get their distance multiplied by this factor so Dijkstra
+    # strongly prefers pedestrian paths when both are available.
+    ROAD_PENALTY = 3
 
     class Handler(osmium.SimpleHandler):
         def __init__(self):
             super().__init__()
             self.node_coords = {}
-            self._ways = []
+            self._ways = []  # list of (node_refs, highway_tag)
 
         def way(self, w):
             hw = w.tags.get("highway", "")
@@ -602,7 +610,7 @@ def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
                 # with locations=True, node locations are available on way nodes
                 if n.location.valid():
                     self.node_coords[n.ref] = (n.location.lat, n.location.lon)
-            self._ways.append(nodes)
+            self._ways.append((nodes, hw))
 
     handler = Handler()
     handler.apply_file(osm_path, locations=True)
@@ -615,7 +623,10 @@ def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
         nodes.append(handler.node_coords[nid])
 
     edge_list = defaultdict(list)
-    for way_nodes in handler._ways:
+    pedestrian_node_set = set()  # node indices touched by at least one pedestrian-priority way
+    for way_nodes, hw in handler._ways:
+        penalty = 1 if hw in PEDESTRIAN_PRIORITY else ROAD_PENALTY
+        is_ped = hw in PEDESTRIAN_PRIORITY
         for k in range(len(way_nodes) - 1):
             a, b = way_nodes[k], way_nodes[k + 1]
             if a not in node_idx_map or b not in node_idx_map:
@@ -623,9 +634,12 @@ def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
             ai, bi = node_idx_map[a], node_idx_map[b]
             lat1, lon1 = nodes[ai]
             lat2, lon2 = nodes[bi]
-            dist = min(int(haversine(lat1, lon1, lat2, lon2)), MAX_U16)
+            dist = min(int(haversine(lat1, lon1, lat2, lon2)) * penalty, MAX_U16)
             edge_list[ai].append((bi, dist))
             edge_list[bi].append((ai, dist))
+            if is_ped:
+                pedestrian_node_set.add(ai)
+                pedestrian_node_set.add(bi)
 
     # prune nodes far from any transit stop
     if stop_coords:
@@ -665,10 +679,13 @@ def build_walk_graph(osm_path, stop_coords, max_walk_radius=2000):
                 for (to, dist) in edge_list.get(ni, []):
                     if to in keep:
                         new_edges[old_to_new[ni]].append((old_to_new[to], dist))
+            pedestrian_node_set = {
+                old_to_new[ni] for ni in pedestrian_node_set if ni in old_to_new
+            }
             nodes = new_nodes
             edge_list = new_edges
 
-    return nodes, edge_list
+    return nodes, edge_list, pedestrian_node_set
 
 
 def compress_walk_graph(nodes, edge_list, protected_nodes):
@@ -774,11 +791,14 @@ def compress_walk_graph(nodes, edge_list, protected_nodes):
     return new_nodes, new_edge_list
 
 
-def link_stops_to_walk_graph(stops, walk_nodes):
+def link_stops_to_walk_graph(stops, walk_nodes, pedestrian_node_set=None):
     """
     for each stop, find the nearest walk graph node.
     entrances (type 2) and platforms (type 0) are linked; stations (type 1)
     are linked if they have coordinates.
+    When pedestrian_node_set is provided, nodes on pedestrian-priority ways
+    are preferred: we first search for a pedestrian node within 500 m, and
+    only fall back to any node (including road-class) if none is found.
     """
     if not walk_nodes:
         return [MAX_U32] * len(stops)
@@ -800,16 +820,29 @@ def link_stops_to_walk_graph(stops, walk_nodes):
             continue
         gx = int(slon / grid_size)
         gy = int(slat / grid_size)
-        best_idx = MAX_U32
-        best_dist = 500.0
+
+        best_ped_idx = MAX_U32
+        best_ped_dist = 500.0
+        best_any_idx = MAX_U32
+        best_any_dist = 500.0
+
         for dx in range(-2, 3):
             for dy in range(-2, 3):
                 for ni in grid.get((gx + dx, gy + dy), []):
                     d = haversine(slat, slon, walk_nodes[ni][0], walk_nodes[ni][1])
-                    if d < best_dist:
-                        best_dist = d
-                        best_idx = ni
-        result.append(best_idx)
+                    if d < best_any_dist:
+                        best_any_dist = d
+                        best_any_idx = ni
+                    if pedestrian_node_set is not None and ni in pedestrian_node_set:
+                        if d < best_ped_dist:
+                            best_ped_dist = d
+                            best_ped_idx = ni
+
+        if pedestrian_node_set is not None and best_ped_idx != MAX_U32:
+            result.append(best_ped_idx)
+        else:
+            result.append(best_any_idx)
+
     return result
 
 
@@ -1065,17 +1098,17 @@ def main():
     transfers = compute_transfers(gtfs)
     print(f"  {len(transfers)} transfers")
 
-    walk_nodes, walk_edges = [], {}
+    walk_nodes, walk_edges, walk_ped_nodes = [], {}, set()
     if args.osm:
         print("reading osm pedestrian graph...")
         stop_coords = [(get_lat(s), get_lon(s)) for s in gtfs.stops if get_location_type(s) in (0, 1, 2)]
-        walk_nodes, walk_edges = build_walk_graph(args.osm, stop_coords)
+        walk_nodes, walk_edges, walk_ped_nodes = build_walk_graph(args.osm, stop_coords)
         print(f"  {len(walk_nodes)} walk nodes, {sum(len(v) for v in walk_edges.values())} walk edges")
     else:
         print("no osm file provided, skipping walk graph")
 
     print("linking stops to walk graph...")
-    stop_walk_links = link_stops_to_walk_graph(gtfs.stops, walk_nodes)
+    stop_walk_links = link_stops_to_walk_graph(gtfs.stops, walk_nodes, walk_ped_nodes if walk_nodes else None)
     linked = sum(1 for x in stop_walk_links if x != MAX_U32)
     print(f"  {linked}/{len(gtfs.stops)} stops linked")
 

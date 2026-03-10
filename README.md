@@ -87,3 +87,9 @@ const plans = router.plan({
 | `max_transfers` | no | max transfers allowed (default 3) |
 | `max_walk_distance` | no | max access/egress walk in meters (default 1600) |
 | `walking_speed` | no | `"slow"`, `"normal"`, or `"fast"` |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/wlabs.png">
+  <source media="(prefers-color-scheme: light)" srcset="images/wlabs.png">
+  <img alt="Wheels Labs" src="images/wlabs.png" width="70">
+</picture>

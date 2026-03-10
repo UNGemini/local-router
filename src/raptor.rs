@@ -339,6 +339,8 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
 // returns (trip_num_within_route, freq_delta) where freq_delta is added to all stop times.
 // for schedule trips: freq_delta = 0, uses binary search.
 // for frequency template trips: computes next headway departure mathematically.
+const MAX_WAIT_SECS: u32 = 3 * 3600; // 3-hour cap on waiting for a trip
+
 fn earliest_trip(
     data: &TransitData,
     route: &crate::data::Route,
@@ -346,6 +348,7 @@ fn earliest_trip(
     min_dep: u32,
     service_day: u16,
 ) -> Option<(u32, u32)> {
+    let max_dep = min_dep.saturating_add(MAX_WAIT_SECS);
     let num_trips = route.num_trips;
     if num_trips == 0 {
         return None;
@@ -388,7 +391,7 @@ fn earliest_trip(
                 continue;
             }
             let dep = route.departure_at(&data.departures, t, stop_pos);
-            if dep == NOT_SET || dep < min_dep {
+            if dep == NOT_SET || dep < min_dep || dep > max_dep {
                 continue;
             }
             let candidate = (t, 0u32);
@@ -430,6 +433,9 @@ fn earliest_trip(
                 // freq_delta: shift to apply to all template stop times for this run
                 let freq_delta = next_dep.saturating_sub(template_dep);
                 let actual_dep = template_dep + freq_delta;
+                if actual_dep > max_dep {
+                    continue;
+                }
                 if best.is_none()
                     || actual_dep
                         < route
