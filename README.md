@@ -15,7 +15,7 @@ Wheels Router Nano is:
 
 Wheels Router Nano is not [Wheels Router](https://router.justusewheels.com/) Service. Wheels Router Nano does not account for the fares, and might have differances in it's results.
 
-Nano is not designed to handle large feeds, although it may have the capability to do so.
+Nano is not designed to handle large feeds, although it may have the capability to do so. Check out [MOTIS](github.com/motis-project/motis)!
 
 Maintained by Wheels Labs, a part of Wheels Softworks
 
@@ -27,16 +27,19 @@ Maintained by Wheels Labs, a part of Wheels Softworks
 
 ### Setup
 
-Prerequisites: Rust, Python 3, [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
+Prerequisites: Rust, [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)
+
+Build the data file from a GTFS zip and optional OSM extract:
 
 ```bash
-pip install pycapnp pyosmium
+cargo build -p pipeline-rs --release
+./target/release/pipeline --gtfs data/gtfs.zip --osm data/region.osm.pbf -o data/region.wheelsrouter
 ```
 
-Build the data file from a GTFS zip and OSM extract:
+OSM is optional. Without it, transfers use a 3 km radius instead of the walk graph:
 
 ```bash
-python -m pipeline.build --gtfs data/gtfs.zip --osm data/region.osm.pbf -o data/region.wheelsrouter
+./target/release/pipeline --gtfs data/gtfs.zip -o data/region.wheelsrouter
 ```
 
 Build the WASM package:
