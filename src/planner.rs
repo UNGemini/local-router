@@ -3,7 +3,7 @@
 // to match the wheels router web api
 
 use crate::data::{TransitData, NOT_SET};
-use crate::raptor::{self, RaptorJourney, RaptorQuery};
+use crate::raptor::{self, RaptorBuffers, RaptorJourney, RaptorQuery};
 use crate::types::*;
 use crate::walker;
 
@@ -78,7 +78,7 @@ pub struct PlanRequest {
     pub walking_speed: Option<String>,
 }
 
-pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
+pub fn plan(data: &TransitData, req: &PlanRequest, bufs: &mut RaptorBuffers) -> PlanResponse {
     let max_walk = req.max_walk_distance.unwrap_or(DEFAULT_MAX_WALK);
     let max_transfers = req.max_transfers.unwrap_or(DEFAULT_MAX_TRANSFERS);
     let max_results = req.max_results.unwrap_or(DEFAULT_MAX_RESULTS);
@@ -121,7 +121,7 @@ pub fn plan(data: &TransitData, req: &PlanRequest) -> PlanResponse {
                 max_transfers,
                 max_results,
             };
-            let batch = raptor::run(data, &query);
+            let batch = raptor::run_with_buffers(data, &query, bufs);
             journeys.extend(batch);
             dep += RANGE_STEP_SECS;
             // stop early if we already have plenty of candidates

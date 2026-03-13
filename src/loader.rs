@@ -199,6 +199,16 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
     let geom_data = wg_reader.get_geometry()?;
     let geometry = unpack_geometry(geom_data);
 
+    // build spatial grid for nearest_node lookups (precomputed once at load time)
+    const GRID_CELL: f32 = 0.001;
+    let mut node_grid: std::collections::HashMap<(i32, i32), Vec<u32>> =
+        std::collections::HashMap::with_capacity(walk_nodes.len() / 4);
+    for (i, n) in walk_nodes.iter().enumerate() {
+        let gy = (n.lat / GRID_CELL) as i32;
+        let gx = (n.lon / GRID_CELL) as i32;
+        node_grid.entry((gy, gx)).or_default().push(i as u32);
+    }
+
     Ok(TransitData {
         feed_id,
         timezone,
@@ -214,6 +224,7 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
             nodes: walk_nodes,
             edges: walk_edges,
             geometry,
+            node_grid,
         },
         fare_rules,
     })

@@ -151,6 +151,9 @@ pub struct WalkGraph {
     pub edges: Vec<WalkEdge>,
     // flat packed geometry: (lat, lon) pairs for compressed edges
     pub geometry: Vec<(f32, f32)>,
+    // precomputed spatial grid: (gy, gx) -> list of node indices
+    // cell size = 0.001 degrees (~111m), built once at load time
+    pub node_grid: std::collections::HashMap<(i32, i32), Vec<u32>>,
 }
 
 #[derive(Debug, Clone, Copy)]

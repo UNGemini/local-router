@@ -15,6 +15,8 @@ Wheels Router Nano is:
 
 Wheels Router Nano is not [Wheels Router](https://router.justusewheels.com/) Service. Wheels Router Nano does not account for the fares, and might have differances in it's results.
 
+Nano is not designed to handle large feeds, although it may have the capability to do so.
+
 Maintained by Wheels Labs, a part of Wheels Softworks
 
 ### Contributing
@@ -87,6 +89,7 @@ const plans = router.plan({
 | `max_transfers` | no | max transfers allowed (default 3) |
 | `max_walk_distance` | no | max access/egress walk in meters (default 1600) |
 | `walking_speed` | no | `"slow"`, `"normal"`, or `"fast"` |
+
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/wlabs.png">

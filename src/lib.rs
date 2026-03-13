@@ -13,29 +13,39 @@ mod transit_capnp {
 }
 
 use planner::PlanRequest;
+use raptor::RaptorBuffers;
 use types::PlanResponse;
 
 // the main router instance, holds loaded transit data
 pub struct Router {
     data: data::TransitData,
+    bufs: std::cell::RefCell<RaptorBuffers>,
 }
 
 impl Router {
     // load a .wheelsrouter file from bytes
     pub fn load(bytes: &[u8]) -> Result<Self, String> {
         let data = loader::load(bytes).map_err(|e| format!("failed to load data: {}", e))?;
-        Ok(Router { data })
+        let num_stops = data.stops.len();
+        let num_routes = data.routes.len();
+        let max_transfers = 3; // DEFAULT_MAX_TRANSFERS
+        let mut bufs = RaptorBuffers::new(num_stops, max_transfers);
+        bufs.ensure_capacity(num_stops, max_transfers, num_routes);
+        Ok(Router {
+            data,
+            bufs: std::cell::RefCell::new(bufs),
+        })
     }
 
     // plan a trip from a structured request
     pub fn plan(&self, req: &PlanRequest) -> PlanResponse {
-        planner::plan(&self.data, req)
+        planner::plan(&self.data, req, &mut self.bufs.borrow_mut())
     }
 
     // plan a trip from a json string (convenience wrapper for non-wasm use)
     pub fn plan_json(&self, request_json: &str) -> Result<String, String> {
         let req = parse_request_json(request_json)?;
-        let response = planner::plan(&self.data, &req);
+        let response = planner::plan(&self.data, &req, &mut self.bufs.borrow_mut());
         serde_json::to_string(&response).map_err(|e| format!("json error: {}", e))
     }
 

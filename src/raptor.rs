@@ -7,6 +7,7 @@
 // - binary search for earliest valid trip on each route
 // - bitfield calendar for o(1) service day check
 // - rounds limited by max_transfers to bound computation
+// - reusable buffers (RaptorBuffers) avoid per-call allocation in range-raptor
 
 use crate::data::{TransitData, NOT_SET};
 
@@ -52,70 +53,142 @@ pub struct RaptorQuery {
     pub max_results: usize,
 }
 
+/// Reusable heap allocations for RAPTOR.
+/// Allocate once (sized for the loaded network) and pass to `run_with_buffers`
+/// to avoid repeated `vec![NOT_SET; num_stops]` allocations during range-RAPTOR.
+pub struct RaptorBuffers {
+    num_stops: usize,
+    max_rounds: usize,
+    pub best_real: Vec<u32>,
+    pub best_penalized: Vec<u32>,
+    pub best_per_round_real: Vec<Vec<u32>>,
+    pub best_per_round_penalized: Vec<Vec<u32>>,
+    pub parents: Vec<Vec<Parent>>,
+    pub marked: Vec<bool>,
+    pub new_marked: Vec<bool>,
+    pub route_seen: Vec<u32>,
+}
+
+// Parent must be pub so RaptorBuffers can hold it, but callers don't need to inspect it.
+#[derive(Clone, Copy)]
+pub struct Parent {
+    pub route_idx: u32,
+    pub trip_num: u32,
+    pub board_stop_pos: u32,
+    pub board_time: u32,
+    pub freq_delta: u32,
+    pub prev_stop_idx: u32,
+}
+
+impl RaptorBuffers {
+    /// Allocate buffers sized for `num_stops` stops and `max_transfers` transfers.
+    pub fn new(num_stops: usize, max_transfers: usize) -> Self {
+        let max_rounds = max_transfers + 1;
+        let empty_parent = Parent {
+            route_idx: NOT_SET,
+            trip_num: NOT_SET,
+            board_stop_pos: NOT_SET,
+            board_time: NOT_SET,
+            freq_delta: 0,
+            prev_stop_idx: NOT_SET,
+        };
+        RaptorBuffers {
+            num_stops,
+            max_rounds,
+            best_real: vec![NOT_SET; num_stops],
+            best_penalized: vec![NOT_SET; num_stops],
+            best_per_round_real: vec![vec![NOT_SET; num_stops]; max_rounds + 1],
+            best_per_round_penalized: vec![vec![NOT_SET; num_stops]; max_rounds + 1],
+            parents: vec![vec![empty_parent; num_stops]; max_rounds + 1],
+            marked: vec![false; num_stops],
+            new_marked: vec![false; num_stops],
+            route_seen: Vec::new(), // sized per call from data.routes.len()
+        }
+    }
+
+    /// Grow buffers if necessary (e.g. if called with different data).
+    pub fn ensure_capacity(&mut self, num_stops: usize, max_transfers: usize, num_routes: usize) {
+        let max_rounds = max_transfers + 1;
+        if num_stops > self.num_stops || max_rounds > self.max_rounds {
+            *self = RaptorBuffers::new(num_stops, max_transfers);
+        }
+        if self.route_seen.len() < num_routes {
+            self.route_seen.resize(num_routes, NOT_SET);
+        }
+    }
+
+    /// Reset all per-call state to NOT_SET / false.
+    fn reset(&mut self, num_stops: usize, max_rounds: usize) {
+        let empty_parent = Parent {
+            route_idx: NOT_SET,
+            trip_num: NOT_SET,
+            board_stop_pos: NOT_SET,
+            board_time: NOT_SET,
+            freq_delta: 0,
+            prev_stop_idx: NOT_SET,
+        };
+        self.best_real[..num_stops].fill(NOT_SET);
+        self.best_penalized[..num_stops].fill(NOT_SET);
+        for r in 0..=max_rounds {
+            self.best_per_round_real[r][..num_stops].fill(NOT_SET);
+            self.best_per_round_penalized[r][..num_stops].fill(NOT_SET);
+            self.parents[r][..num_stops].fill(empty_parent);
+        }
+        self.marked[..num_stops].fill(false);
+    }
+}
+
 pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
     let num_stops = data.stops.len();
+    let mut bufs = RaptorBuffers::new(num_stops, query.max_transfers as usize);
+    bufs.ensure_capacity(num_stops, query.max_transfers as usize, data.routes.len());
+    run_with_buffers(data, query, &mut bufs)
+}
+
+/// Run RAPTOR reusing pre-allocated buffers (for range-RAPTOR loops).
+pub fn run_with_buffers(
+    data: &TransitData,
+    query: &RaptorQuery,
+    bufs: &mut RaptorBuffers,
+) -> Vec<RaptorJourney> {
+    let num_stops = data.stops.len();
+    let num_routes = data.routes.len();
     let max_rounds = query.max_transfers as usize + 1;
 
-    // dual arrays: real = physical arrival time, penalized = real + accumulated transit penalty.
-    // routing decisions (is this alight better?) use penalized times.
-    // boarding feasibility (can I catch this trip?) uses real times.
-    // journey reconstruction uses real times only.
-    let mut best_real = vec![NOT_SET; num_stops];
-    let mut best_penalized = vec![NOT_SET; num_stops];
-    let mut best_per_round_real = vec![vec![NOT_SET; num_stops]; max_rounds + 1];
-    let mut best_per_round_penalized = vec![vec![NOT_SET; num_stops]; max_rounds + 1];
-
-    // parent pointers for journey reconstruction
-    #[derive(Clone, Copy)]
-    struct Parent {
-        route_idx: u32,
-        trip_num: u32,
-        board_stop_pos: u32,
-        board_time: u32,
-        freq_delta: u32,
-        prev_stop_idx: u32,
-    }
-    let empty_parent = Parent {
-        route_idx: NOT_SET,
-        trip_num: NOT_SET,
-        board_stop_pos: NOT_SET,
-        board_time: NOT_SET,
-        freq_delta: 0,
-        prev_stop_idx: NOT_SET,
-    };
-    let mut parents = vec![vec![empty_parent; num_stops]; max_rounds + 1];
+    // Reset reusable buffers instead of allocating fresh vectors
+    bufs.ensure_capacity(num_stops, query.max_transfers as usize, num_routes);
+    bufs.reset(num_stops, max_rounds);
 
     // initialize: set origin stops with walking time (no transit penalty on walking)
-    let mut marked = vec![false; num_stops];
     for &(stop_idx, walk_secs) in &query.origin_stops {
         let arr = query.departure_time + walk_secs;
-        if arr < best_real[stop_idx as usize] {
-            best_real[stop_idx as usize] = arr;
-            best_penalized[stop_idx as usize] = arr;
-            best_per_round_real[0][stop_idx as usize] = arr;
-            best_per_round_penalized[0][stop_idx as usize] = arr;
-            marked[stop_idx as usize] = true;
+        if arr < bufs.best_real[stop_idx as usize] {
+            bufs.best_real[stop_idx as usize] = arr;
+            bufs.best_penalized[stop_idx as usize] = arr;
+            bufs.best_per_round_real[0][stop_idx as usize] = arr;
+            bufs.best_per_round_penalized[0][stop_idx as usize] = arr;
+            bufs.marked[stop_idx as usize] = true;
         }
     }
 
     // raptor rounds
     for k in 1..=max_rounds {
-        // collect routes to scan from marked stops
+        // collect routes to scan from marked stops, reusing route_seen buffer
+        bufs.route_seen[..num_routes].fill(NOT_SET);
         let mut routes_to_scan: Vec<(u32, u32)> = Vec::new();
-        let mut route_seen = vec![NOT_SET; data.routes.len()];
 
         for stop_idx in 0..num_stops {
-            if !marked[stop_idx] {
+            if !bufs.marked[stop_idx] {
                 continue;
             }
             for &route_idx in &data.stops[stop_idx].route_idxs {
                 let route = &data.routes[route_idx as usize];
                 for (pos, &sidx) in route.stop_idxs.iter().enumerate() {
                     if sidx == stop_idx as u32 {
-                        if route_seen[route_idx as usize] == NOT_SET
-                            || (pos as u32) < route_seen[route_idx as usize]
+                        if bufs.route_seen[route_idx as usize] == NOT_SET
+                            || (pos as u32) < bufs.route_seen[route_idx as usize]
                         {
-                            route_seen[route_idx as usize] = pos as u32;
+                            bufs.route_seen[route_idx as usize] = pos as u32;
                         }
                         break;
                     }
@@ -123,13 +196,14 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
             }
         }
 
-        for (ridx, &earliest_pos) in route_seen.iter().enumerate() {
+        for (ridx, &earliest_pos) in bufs.route_seen[..num_routes].iter().enumerate() {
             if earliest_pos != NOT_SET {
                 routes_to_scan.push((ridx as u32, earliest_pos));
             }
         }
 
-        let mut new_marked = vec![false; num_stops];
+        // reset new_marked for this round
+        bufs.new_marked[..num_stops].fill(false);
 
         // scan each route
         for &(route_idx, earliest_pos) in &routes_to_scan {
@@ -161,13 +235,13 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
                             .saturating_add(ride_time)
                             .saturating_add(penalty);
                         // use penalized for comparison, store both
-                        if penalized_arr < best_penalized[stop_idx] {
-                            best_real[stop_idx] = best_real[stop_idx].min(real_arr);
-                            best_penalized[stop_idx] = penalized_arr;
-                            best_per_round_real[k][stop_idx] = real_arr;
-                            best_per_round_penalized[k][stop_idx] = penalized_arr;
-                            new_marked[stop_idx] = true;
-                            parents[k][stop_idx] = Parent {
+                        if penalized_arr < bufs.best_penalized[stop_idx] {
+                            bufs.best_real[stop_idx] = bufs.best_real[stop_idx].min(real_arr);
+                            bufs.best_penalized[stop_idx] = penalized_arr;
+                            bufs.best_per_round_real[k][stop_idx] = real_arr;
+                            bufs.best_per_round_penalized[k][stop_idx] = penalized_arr;
+                            bufs.new_marked[stop_idx] = true;
+                            bufs.parents[k][stop_idx] = Parent {
                                 route_idx,
                                 trip_num,
                                 board_stop_pos,
@@ -181,7 +255,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
 
                 // try to board an earlier trip at this stop.
                 // use REAL arrival from previous round (must physically be there to board).
-                let prev_real = best_per_round_real[k - 1][stop_idx];
+                let prev_real = bufs.best_per_round_real[k - 1][stop_idx];
                 if prev_real == NOT_SET {
                     continue;
                 }
@@ -197,7 +271,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
                         board_stop_pos = pos as u32;
                         board_time = dep;
                         // carry forward the penalized time at this stop
-                        board_penalized = best_per_round_penalized[k - 1][stop_idx];
+                        board_penalized = bufs.best_per_round_penalized[k - 1][stop_idx];
                         // if we wait, the wait time is real (no penalty on waiting)
                         let wait = dep.saturating_sub(prev_real);
                         board_penalized = board_penalized.saturating_add(wait);
@@ -208,7 +282,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
 
         // footpath transfers: extend arrivals via walking (no transit penalty on walking)
         for stop_idx in 0..num_stops {
-            if !new_marked[stop_idx] {
+            if !bufs.new_marked[stop_idx] {
                 continue;
             }
             let stop = &data.stops[stop_idx];
@@ -216,16 +290,17 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
             let t_end = t_start + stop.num_transfers as usize;
             for t in &data.transfers[t_start..t_end] {
                 let walk_s = t.walk_seconds as u32;
-                let new_real = best_per_round_real[k][stop_idx].saturating_add(walk_s);
-                let new_penalized = best_per_round_penalized[k][stop_idx].saturating_add(walk_s);
+                let new_real = bufs.best_per_round_real[k][stop_idx].saturating_add(walk_s);
+                let new_penalized =
+                    bufs.best_per_round_penalized[k][stop_idx].saturating_add(walk_s);
                 let to = t.to_stop_idx as usize;
-                if new_penalized < best_penalized[to] {
-                    best_real[to] = best_real[to].min(new_real);
-                    best_penalized[to] = new_penalized;
-                    best_per_round_real[k][to] = new_real;
-                    best_per_round_penalized[k][to] = new_penalized;
-                    new_marked[to] = true;
-                    parents[k][to] = Parent {
+                if new_penalized < bufs.best_penalized[to] {
+                    bufs.best_real[to] = bufs.best_real[to].min(new_real);
+                    bufs.best_penalized[to] = new_penalized;
+                    bufs.best_per_round_real[k][to] = new_real;
+                    bufs.best_per_round_penalized[k][to] = new_penalized;
+                    bufs.new_marked[to] = true;
+                    bufs.parents[k][to] = Parent {
                         route_idx: NOT_SET,
                         trip_num: NOT_SET,
                         board_stop_pos: NOT_SET,
@@ -237,8 +312,9 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
             }
         }
 
-        marked = new_marked;
-        if !marked.iter().any(|&m| m) {
+        // swap marked ← new_marked for next round
+        bufs.marked[..num_stops].copy_from_slice(&bufs.new_marked[..num_stops]);
+        if !bufs.marked[..num_stops].iter().any(|&m| m) {
             break;
         }
     }
@@ -247,7 +323,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
     let mut journeys = Vec::new();
     for &(dest_stop, egress_walk) in &query.dest_stops {
         for k in 1..=max_rounds {
-            let arr = best_per_round_real[k][dest_stop as usize];
+            let arr = bufs.best_per_round_real[k][dest_stop as usize];
             if arr == NOT_SET {
                 continue;
             }
@@ -258,7 +334,7 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
             let mut cur_round = k;
 
             while cur_round > 0 {
-                let p = &parents[cur_round][cur_stop];
+                let p = bufs.parents[cur_round][cur_stop];
                 if p.route_idx == NOT_SET && p.prev_stop_idx != NOT_SET {
                     cur_stop = p.prev_stop_idx as usize;
                     continue;

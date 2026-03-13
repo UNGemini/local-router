@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "pipeline-rs"]
+
 [package]
 name = "wheels-router-nano"
 version = "0.1.0"

@@ -3,7 +3,7 @@
 
 use crate::data::{WalkGraph, NOT_SET};
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 
 pub const DEFAULT_WALK_SPEED_MPS: f32 = 1.2;
 const EARTH_RADIUS: f32 = 6_371_000.0;
@@ -24,16 +24,10 @@ fn grid_key(lat: f32, lon: f32) -> (i32, i32) {
     ((lat / GRID_CELL) as i32, (lon / GRID_CELL) as i32)
 }
 
-// find the nearest walk graph node to a lat/lon using a grid spatial index
+// find the nearest walk graph node to a lat/lon using the precomputed grid index
 pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     if graph.nodes.is_empty() {
         return None;
-    }
-    let mut grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
-    for (i, n) in graph.nodes.iter().enumerate() {
-        grid.entry(grid_key(n.lat, n.lon))
-            .or_default()
-            .push(i as u32);
     }
 
     let (gy, gx) = grid_key(lat, lon);
@@ -42,7 +36,7 @@ pub fn nearest_node(graph: &WalkGraph, lat: f32, lon: f32) -> Option<u32> {
     for radius in [1i32, 2, 3] {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                if let Some(nodes) = grid.get(&(gy + dy, gx + dx)) {
+                if let Some(nodes) = graph.node_grid.get(&(gy + dy, gx + dx)) {
                     for &ni in nodes {
                         let n = &graph.nodes[ni as usize];
                         let d = haversine(lat, lon, n.lat, n.lon);
