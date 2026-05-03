@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RAPTOR Visualizer — Wheels Router</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+
+    <!-- ── header ─────────────────────────────────────────────────────── -->
+    <div class="header">
+        <a href="../index.html">
+            <img class="header-logo" src="../images/logomark-light.png" alt="Wheels Router" />
+        </a>
+        <div class="header-sep"></div>
+        <span class="header-title">RAPTOR Visualizer</span>
+        <a class="header-back" href="../index.html">← planner</a>
+        <span class="header-status loading" id="status">loading...</span>
+    </div>
+
+    <!-- ── main ───────────────────────────────────────────────────────── -->
+    <div class="main">
+
+        <!-- ── left panel ─────────────────────────────────────────────── -->
+        <div class="panel">
+
+            <!-- city -->
+            <div class="panel-section">
+                <div class="section-label">city</div>
+                <div class="city-tabs">
+                    <button class="city-tab" id="cityHK">Hong Kong</button>
+                    <button class="city-tab" id="citySF">San Francisco</button>
+                </div>
+            </div>
+
+            <!-- origin + destination -->
+            <div class="panel-section">
+                <div class="section-label">route</div>
+
+                <div class="od-field" id="originField">
+                    <div class="od-dot od-dot--origin"></div>
+                    <div class="od-content">
+                        <div class="od-label">origin</div>
+                        <input type="text" id="originInput" placeholder="click map to set" readonly />
+                    </div>
+                </div>
+
+                <div class="od-connector"></div>
+
+                <div class="od-field" id="destField">
+                    <div class="od-dot od-dot--dest"></div>
+                    <div class="od-content">
+                        <div class="od-label">destination</div>
+                        <input type="text" id="destInput" placeholder="click map to set" readonly />
+                    </div>
+                </div>
+
+                <div class="click-hint" id="clickHint" data-mode="origin">click map to set origin</div>
+            </div>
+
+            <!-- time -->
+            <div class="panel-section">
+                <div class="section-label">departure</div>
+                <div class="row2">
+                    <div class="field-row">
+                        <div class="field-label">date</div>
+                        <input type="date" id="dateInput" />
+                    </div>
+                    <div class="field-row">
+                        <div class="field-label">time</div>
+                        <input type="time" id="timeInput" />
+                    </div>
+                </div>
+                <div class="field-row" style="margin-top:8px">
+                    <div class="field-label">walk speed</div>
+                    <select id="walkspeedSel">
+                        <option value="slow">slow</option>
+                        <option value="normal" selected>normal</option>
+                        <option value="fast">fast</option>
+                    </select>
+                </div>
+                <button class="run-btn" id="runBtn" disabled>run raptor</button>
+            </div>
+
+            <!-- playback -->
+            <div class="panel-section">
+                <div class="section-label">playback</div>
+                <div class="playback">
+                    <button class="pb-btn" id="pbPrevBtn" disabled title="back 5%">‹</button>
+                    <button class="pb-btn" id="pbPlayBtn" disabled title="play / pause">▶</button>
+                    <button class="pb-btn" id="pbNextBtn" disabled title="forward 5%">›</button>
+                    <input type="range" class="pb-slider" id="pbSlider" min="0" max="100" value="0" disabled />
+                    <span class="pb-round-label" id="pbRoundLabel">—</span>
+                </div>
+                <div class="speed-row" style="margin-top:8px">
+                    <label>speed</label>
+                    <select id="speedSel">
+                        <option value="slow">slow</option>
+                        <option value="normal" selected>normal</option>
+                        <option value="fast">fast</option>
+                        <option value="instant">instant</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- stats -->
+            <div class="panel-section">
+                <div class="section-label">results</div>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-val" id="statReached">—</div>
+                        <div class="stat-lbl">stops reached</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-val" id="statRounds">—</div>
+                        <div class="stat-lbl">rounds used</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-val" id="statStops">—</div>
+                        <div class="stat-lbl">total stops</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-val" id="statMs">—</div>
+                        <div class="stat-lbl">compute time</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- round legend -->
+            <div class="panel-section" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
+                <div class="section-label">rounds</div>
+                <div class="round-legend" id="roundLegend"></div>
+            </div>
+
+        </div><!-- /panel -->
+
+        <!-- ── map ────────────────────────────────────────────────────── -->
+        <div class="map-wrap">
+            <div id="map"></div>
+
+            <!-- algorithm annotation -->
+            <div class="algo-box hidden" id="algoBox">
+                <div class="algo-round" id="algoRound"></div>
+                <div class="algo-desc" id="algoDesc"></div>
+            </div>
+
+            <!-- loading overlay -->
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="spinner"></div>
+                <div class="loading-text" id="loadingText">initializing wasm engine...</div>
+            </div>
+        </div>
+
+    </div><!-- /main -->
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>

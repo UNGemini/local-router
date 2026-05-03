@@ -590,7 +590,9 @@
                 <div class="city-slider" id="citySlider"></div>
                 <button class="city-btn active" id="cityBtnHK" onclick="switchCity('hk')">Hong Kong</button>
                 <button class="city-btn" id="cityBtnSF" onclick="switchCity('sf')">San Francisco</button>
+                <button class="city-btn" id="cityBtnVT" onclick="switchCity('vt')">Vermont</button>
             </div>
+            <a href="visualize/" style="font-family:var(--mono);font-size:11.5px;font-weight:500;color:var(--text2);text-decoration:none;flex-shrink:0;letter-spacing:-0.01em;padding:4px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);transition:color .15s,border-color .15s" onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--border2)'" onmouseout="this.style.color='var(--text2)';this.style.borderColor='var(--border)'">visualize</a>
             <div class="header-stats" id="stats"></div>
             <div class="header-status loading" id="status">loading...</div>
         </div>
@@ -656,6 +658,12 @@
                     file: "data/hk.wheelsrouter.gz",
                     center: [22.32, 114.17],
                     zoom: 13,
+                },
+                vt: {
+                    label: "Vermont",
+                    file: "data/vt.wheelsrouter.gz",
+                    center: [44.26, -72.58],
+                    zoom: 9,
                 },
             };
 
@@ -812,9 +820,8 @@
             function positionSlider(cityKey, animate) {
                 const slider = document.getElementById("citySlider");
                 const switcher = document.getElementById("citySwitcher");
-                const btn = cityKey === "hk"
-                    ? document.getElementById("cityBtnHK")
-                    : document.getElementById("cityBtnSF");
+                const btnId = "cityBtn" + cityKey.toUpperCase();
+                const btn = document.getElementById(btnId);
                 const switcherRect = switcher.getBoundingClientRect();
                 const btnRect = btn.getBoundingClientRect();
                 const offset = btnRect.left - switcherRect.left - 3; // 3px = padding
@@ -831,11 +838,14 @@
                 switchingCity = true;
 
                 // update button states and animate slider
-                document.getElementById("cityBtnSF").classList.toggle("active", cityKey === "sf");
-                document.getElementById("cityBtnHK").classList.toggle("active", cityKey === "hk");
+                Object.keys(CITIES).forEach(key => {
+                    const btn = document.getElementById("cityBtn" + key.toUpperCase());
+                    if (btn) {
+                        btn.classList.toggle("active", key === cityKey);
+                        btn.disabled = true;
+                    }
+                });
                 positionSlider(cityKey, true);
-                document.getElementById("cityBtnSF").disabled = true;
-                document.getElementById("cityBtnHK").disabled = true;
 
                 // clear map state
                 clearRoutes();
@@ -856,8 +866,10 @@
                 currentCity = cityKey;
                 await loadCity(cityKey);
 
-                document.getElementById("cityBtnSF").disabled = false;
-                document.getElementById("cityBtnHK").disabled = false;
+                Object.keys(CITIES).forEach(key => {
+                    const btn = document.getElementById("cityBtn" + key.toUpperCase());
+                    if (btn) btn.disabled = false;
+                });
                 switchingCity = false;
             };
 

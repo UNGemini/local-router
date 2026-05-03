@@ -16,6 +16,38 @@ use planner::PlanRequest;
 use raptor::RaptorBuffers;
 use types::PlanResponse;
 
+// Serde-serializable output types for visualization
+#[derive(serde::Serialize)]
+pub struct VizStopJson {
+    pub stop_idx: u32,
+    pub lat: f32,
+    pub lon: f32,
+    pub name: String,
+    pub arrival_secs: u32,
+    pub round: u32,
+    pub route_color: String, // "#rrggbb"
+    pub parent_stop_idx: u32,
+    pub route_idx: u32,       // NOT_SET (0xffffffff) if walk/init
+    pub board_stop_pos: u32,  // position within route (NOT_SET if walk)
+    pub alight_stop_pos: u32, // position within route (NOT_SET if walk)
+}
+
+// One route's stop coordinates, for drawing polyline segments in JS
+#[derive(serde::Serialize)]
+pub struct VizRouteJson {
+    pub color: String,          // "#rrggbb"
+    pub stops: Vec<(f32, f32)>, // (lat, lon) for every stop in the route
+}
+
+#[derive(serde::Serialize)]
+pub struct RaptorVizJson {
+    pub rounds: Vec<Vec<VizStopJson>>,
+    pub departure_time: u32,
+    pub num_stops_total: usize,
+    // routes that appear in the viz, keyed by route_idx (as string for JSON)
+    pub routes: std::collections::HashMap<u32, VizRouteJson>,
+}
+
 // the main router instance, holds loaded transit data
 pub struct Router {
     data: data::TransitData,
@@ -56,6 +88,107 @@ impl Router {
             routes: self.data.routes.len(),
             trips: self.data.trips.len(),
             services: self.data.services.len(),
+        }
+    }
+
+    // run raptor visualization: returns per-round stop reachability
+    pub fn plan_viz(&self, req: &PlanRequest) -> RaptorVizJson {
+        let walk_speed = match req.walking_speed.as_deref() {
+            Some("slow") => 0.8f32,
+            Some("fast") => 1.6f32,
+            Some("normal") | None => walker::DEFAULT_WALK_SPEED_MPS,
+            Some(v) => v.parse::<f32>().unwrap_or(walker::DEFAULT_WALK_SPEED_MPS),
+        };
+        let max_walk = req.max_walk_distance.unwrap_or(1200);
+        let origin_reach = walker::reachable_stops_from_coord(
+            &self.data.walk_graph,
+            &self.data.stops,
+            req.origin_lat as f32,
+            req.origin_lon as f32,
+            max_walk,
+            walk_speed,
+        );
+        let origin_stops: Vec<(u32, u32)> = origin_reach
+            .stops
+            .iter()
+            .map(|&(stop_idx, secs, _dist)| (stop_idx, secs))
+            .collect();
+        let query = raptor::RaptorQuery {
+            origin_stops,
+            dest_stops: vec![],
+            departure_time: req.departure_time,
+            service_day: req.service_day,
+            max_transfers: req.max_transfers.unwrap_or(3),
+            max_results: 1,
+        };
+        let viz = raptor::run_viz(&self.data, &query);
+
+        // collect all route_idxs that appear in the viz
+        let mut route_idxs_used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for round in &viz.rounds {
+            for s in round {
+                if s.route_idx != crate::data::NOT_SET {
+                    route_idxs_used.insert(s.route_idx);
+                }
+            }
+        }
+
+        // build routes map: route_idx → stop coords + color
+        let routes: std::collections::HashMap<u32, VizRouteJson> = route_idxs_used
+            .into_iter()
+            .map(|ridx| {
+                let route = &self.data.routes[ridx as usize];
+                let color = if route.color == 0 {
+                    "#007aff".to_string()
+                } else {
+                    format!("#{:06x}", route.color)
+                };
+                let stops: Vec<(f32, f32)> = route
+                    .stop_idxs
+                    .iter()
+                    .map(|&sidx| {
+                        let s = &self.data.stops[sidx as usize];
+                        (s.lat, s.lon)
+                    })
+                    .collect();
+                (ridx, VizRouteJson { color, stops })
+            })
+            .collect();
+
+        let rounds: Vec<Vec<VizStopJson>> = viz
+            .rounds
+            .into_iter()
+            .map(|stops| {
+                stops
+                    .into_iter()
+                    .map(|s| {
+                        let color = if s.route_color == 0 {
+                            "#007aff".to_string()
+                        } else {
+                            format!("#{:06x}", s.route_color)
+                        };
+                        VizStopJson {
+                            stop_idx: s.stop_idx,
+                            lat: s.lat,
+                            lon: s.lon,
+                            name: s.name,
+                            arrival_secs: s.arrival_secs,
+                            round: s.round,
+                            route_color: color,
+                            parent_stop_idx: s.parent_stop_idx,
+                            route_idx: s.route_idx,
+                            board_stop_pos: s.board_stop_pos,
+                            alight_stop_pos: s.alight_stop_pos,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        RaptorVizJson {
+            rounds,
+            departure_time: viz.departure_time,
+            num_stops_total: self.data.stops.len(),
+            routes,
         }
     }
 }
@@ -223,6 +356,16 @@ mod wasm {
         pub fn stats(&self) -> Result<JsValue, JsError> {
             let s = self.inner.stats();
             serde_wasm_bindgen::to_value(&s)
+                .map_err(|e| JsError::new(&format!("serialization error: {}", e)))
+        }
+
+        // run raptor visualization: returns per-round stop reachability as a js object
+        pub fn plan_viz(&self, request: JsValue) -> Result<JsValue, JsError> {
+            let input: PlanRequestInput = serde_wasm_bindgen::from_value(request)
+                .map_err(|e| JsError::new(&format!("invalid request: {}", e)))?;
+            let req = plan_request_from_input(input).map_err(|e| JsError::new(&e))?;
+            let viz = self.inner.plan_viz(&req);
+            serde_wasm_bindgen::to_value(&viz)
                 .map_err(|e| JsError::new(&format!("serialization error: {}", e)))
         }
     }

@@ -145,6 +145,257 @@ pub fn run(data: &TransitData, query: &RaptorQuery) -> Vec<RaptorJourney> {
     run_with_buffers(data, query, &mut bufs)
 }
 
+// --- Visualization support -----------------------------------------------
+
+/// A single stop's reach state at a given RAPTOR round, for visualization.
+#[derive(Debug, Clone)]
+pub struct VizStop {
+    pub stop_idx: u32,
+    pub lat: f32,
+    pub lon: f32,
+    pub name: String,
+    pub arrival_secs: u32,    // real (non-penalized) arrival time
+    pub round: u32,           // which RAPTOR round first reached this stop
+    pub route_color: u32,     // GTFS color of the route that reached this stop (0 = walk/init)
+    pub parent_stop_idx: u32, // NOT_SET if origin
+    pub route_idx: u32,       // route that reached this stop (NOT_SET if walk/init)
+    pub board_stop_pos: u32,  // position within route where we boarded (NOT_SET if walk)
+    pub alight_stop_pos: u32, // position within route where we alighted (NOT_SET if walk)
+}
+
+/// Complete visualization snapshot: stops reached per round.
+#[derive(Debug, Clone)]
+pub struct RaptorVizResult {
+    pub rounds: Vec<Vec<VizStop>>, // rounds[k] = stops newly reached in round k
+    pub departure_time: u32,
+}
+
+/// Run RAPTOR and collect per-round visualization state.
+pub fn run_viz(data: &TransitData, query: &RaptorQuery) -> RaptorVizResult {
+    let num_stops = data.stops.len();
+    let num_routes = data.routes.len();
+    let max_rounds = query.max_transfers as usize + 1;
+
+    let mut bufs = RaptorBuffers::new(num_stops, query.max_transfers as usize);
+    bufs.ensure_capacity(num_stops, query.max_transfers as usize, num_routes);
+    bufs.reset(num_stops, max_rounds);
+
+    // round 0: initialize origin stops
+    for &(stop_idx, walk_secs) in &query.origin_stops {
+        let arr = query.departure_time + walk_secs;
+        if arr < bufs.best_real[stop_idx as usize] {
+            bufs.best_real[stop_idx as usize] = arr;
+            bufs.best_penalized[stop_idx as usize] = arr;
+            bufs.best_per_round_real[0][stop_idx as usize] = arr;
+            bufs.best_per_round_penalized[0][stop_idx as usize] = arr;
+            bufs.marked[stop_idx as usize] = true;
+        }
+    }
+
+    // per-round newly-reached stops for visualization
+    // round_reached[stop_idx] = which round first reached it (NOT_SET = not yet reached)
+    let mut round_reached: Vec<u32> = vec![NOT_SET; num_stops];
+    let mut round_color: Vec<u32> = vec![0u32; num_stops]; // route color at reach time
+    let mut round_parent: Vec<u32> = vec![NOT_SET; num_stops];
+    let mut round_route_idx: Vec<u32> = vec![NOT_SET; num_stops];
+    let mut round_board_pos: Vec<u32> = vec![NOT_SET; num_stops];
+    let mut round_alight_pos: Vec<u32> = vec![NOT_SET; num_stops];
+
+    // mark origin stops as round 0
+    for &(stop_idx, _) in &query.origin_stops {
+        if bufs.best_real[stop_idx as usize] != NOT_SET {
+            round_reached[stop_idx as usize] = 0;
+        }
+    }
+
+    // raptor rounds
+    for k in 1..=max_rounds {
+        bufs.route_seen[..num_routes].fill(NOT_SET);
+
+        for stop_idx in 0..num_stops {
+            if !bufs.marked[stop_idx] {
+                continue;
+            }
+            for &route_idx in &data.stops[stop_idx].route_idxs {
+                let route = &data.routes[route_idx as usize];
+                for (pos, &sidx) in route.stop_idxs.iter().enumerate() {
+                    if sidx == stop_idx as u32 {
+                        if bufs.route_seen[route_idx as usize] == NOT_SET
+                            || (pos as u32) < bufs.route_seen[route_idx as usize]
+                        {
+                            bufs.route_seen[route_idx as usize] = pos as u32;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut routes_to_scan: Vec<(u32, u32)> = Vec::new();
+        for (ridx, &earliest_pos) in bufs.route_seen[..num_routes].iter().enumerate() {
+            if earliest_pos != NOT_SET {
+                routes_to_scan.push((ridx as u32, earliest_pos));
+            }
+        }
+
+        bufs.new_marked[..num_stops].fill(false);
+
+        for &(route_idx, earliest_pos) in &routes_to_scan {
+            let route = &data.routes[route_idx as usize];
+            let num_stops_in_route = route.stop_idxs.len();
+            if num_stops_in_route == 0 || route.num_trips == 0 {
+                continue;
+            }
+
+            let mut current_trip: Option<(u32, u32)> = None;
+            let mut board_stop_pos: u32 = 0;
+            let mut board_time: u32 = NOT_SET;
+            let mut board_penalized: u32 = NOT_SET;
+
+            for pos in earliest_pos as usize..num_stops_in_route {
+                let stop_idx = route.stop_idxs[pos] as usize;
+
+                if let Some((trip_num, freq_delta)) = current_trip {
+                    let real_arr = route
+                        .arrival_at(&data.arrivals, trip_num, pos)
+                        .saturating_add(freq_delta);
+                    if real_arr != NOT_SET {
+                        let ride_time = real_arr.saturating_sub(board_time);
+                        let penalty = (ride_time as f32 * TRANSIT_PENALTY_FRACTION) as u32;
+                        let penalized_arr = board_penalized
+                            .saturating_add(ride_time)
+                            .saturating_add(penalty);
+                        if penalized_arr < bufs.best_penalized[stop_idx] {
+                            bufs.best_real[stop_idx] = bufs.best_real[stop_idx].min(real_arr);
+                            bufs.best_penalized[stop_idx] = penalized_arr;
+                            bufs.best_per_round_real[k][stop_idx] = real_arr;
+                            bufs.best_per_round_penalized[k][stop_idx] = penalized_arr;
+                            bufs.new_marked[stop_idx] = true;
+                            bufs.parents[k][stop_idx] = Parent {
+                                route_idx,
+                                trip_num,
+                                board_stop_pos,
+                                board_time,
+                                freq_delta,
+                                prev_stop_idx: NOT_SET,
+                            };
+                            // record for viz
+                            if round_reached[stop_idx] == NOT_SET {
+                                round_reached[stop_idx] = k as u32;
+                                round_color[stop_idx] = route.color;
+                                let board_stop_global = route.stop_idxs[board_stop_pos as usize];
+                                round_parent[stop_idx] = board_stop_global;
+                                round_route_idx[stop_idx] = route_idx;
+                                round_board_pos[stop_idx] = board_stop_pos;
+                                round_alight_pos[stop_idx] = pos as u32;
+                            }
+                        }
+                    }
+                }
+
+                let prev_real = bufs.best_per_round_real[k - 1][stop_idx];
+                if prev_real == NOT_SET {
+                    continue;
+                }
+                if let Some((tn, fd)) =
+                    earliest_trip(data, route, pos, prev_real, query.service_day)
+                {
+                    let dep = route
+                        .departure_at(&data.departures, tn, pos)
+                        .saturating_add(fd);
+                    if current_trip.is_none() || dep < board_time {
+                        current_trip = Some((tn, fd));
+                        board_stop_pos = pos as u32;
+                        board_time = dep;
+                        board_penalized = bufs.best_per_round_penalized[k - 1][stop_idx];
+                        let wait = dep.saturating_sub(prev_real);
+                        board_penalized = board_penalized.saturating_add(wait);
+                    }
+                }
+            }
+        }
+
+        // footpath transfers
+        for stop_idx in 0..num_stops {
+            if !bufs.new_marked[stop_idx] {
+                continue;
+            }
+            let stop = &data.stops[stop_idx];
+            let t_start = stop.transfers_offset as usize;
+            let t_end = t_start + stop.num_transfers as usize;
+            for t in &data.transfers[t_start..t_end] {
+                let walk_s = t.walk_seconds as u32;
+                let new_real = bufs.best_per_round_real[k][stop_idx].saturating_add(walk_s);
+                let new_penalized =
+                    bufs.best_per_round_penalized[k][stop_idx].saturating_add(walk_s);
+                let to = t.to_stop_idx as usize;
+                if new_penalized < bufs.best_penalized[to] {
+                    bufs.best_real[to] = bufs.best_real[to].min(new_real);
+                    bufs.best_penalized[to] = new_penalized;
+                    bufs.best_per_round_real[k][to] = new_real;
+                    bufs.best_per_round_penalized[k][to] = new_penalized;
+                    bufs.new_marked[to] = true;
+                    bufs.parents[k][to] = Parent {
+                        route_idx: NOT_SET,
+                        trip_num: NOT_SET,
+                        board_stop_pos: NOT_SET,
+                        board_time: NOT_SET,
+                        freq_delta: 0,
+                        prev_stop_idx: stop_idx as u32,
+                    };
+                    if round_reached[to] == NOT_SET {
+                        round_reached[to] = k as u32;
+                        round_color[to] = round_color[stop_idx]; // inherit from source
+                        round_parent[to] = stop_idx as u32;
+                    }
+                }
+            }
+        }
+
+        bufs.marked[..num_stops].copy_from_slice(&bufs.new_marked[..num_stops]);
+        if !bufs.marked[..num_stops].iter().any(|&m| m) {
+            break;
+        }
+    }
+
+    // Build the result: group newly-reached stops per round
+    let mut rounds: Vec<Vec<VizStop>> = vec![Vec::new(); max_rounds + 1];
+    for stop_idx in 0..num_stops {
+        let r = round_reached[stop_idx];
+        if r == NOT_SET {
+            continue;
+        }
+        let round_idx = r as usize;
+        let arr_time = if round_idx == 0 {
+            bufs.best_per_round_real[0][stop_idx]
+        } else {
+            bufs.best_per_round_real[round_idx][stop_idx]
+        };
+        if arr_time == NOT_SET {
+            continue;
+        }
+        let stop = &data.stops[stop_idx];
+        rounds[round_idx].push(VizStop {
+            stop_idx: stop_idx as u32,
+            lat: stop.lat,
+            lon: stop.lon,
+            name: stop.name.clone(),
+            arrival_secs: arr_time,
+            round: r,
+            route_color: round_color[stop_idx],
+            parent_stop_idx: round_parent[stop_idx],
+            route_idx: round_route_idx[stop_idx],
+            board_stop_pos: round_board_pos[stop_idx],
+            alight_stop_pos: round_alight_pos[stop_idx],
+        });
+    }
+
+    RaptorVizResult {
+        rounds,
+        departure_time: query.departure_time,
+    }
+}
+
 /// Run RAPTOR reusing pre-allocated buffers (for range-RAPTOR loops).
 pub fn run_with_buffers(
     data: &TransitData,
