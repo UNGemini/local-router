@@ -126,6 +126,29 @@ fn main() -> Result<()> {
         )
     };
 
+    // ---- OSM directed road graph (vehicle profile for the road assistant) ----
+    let (road_nodes, road_edges) = if let Some(osm_path) = &args.osm {
+        let pb = spinner("reading osm road graph");
+        let stop_coords: Vec<(f64, f64)> = gtfs
+            .stops
+            .iter()
+            .filter(|s| s.location_type <= 2)
+            .map(|s| (s.stop_lat as f64, s.stop_lon as f64))
+            .collect();
+        let (nodes, edges) = osm::build_road_graph(osm_path, &stop_coords, 2000.0)
+            .context("failed to build road graph")?;
+        let total_edges: usize = edges.values().map(|v| v.len()).sum();
+        pb.finish_with_message(format!(
+            "road graph  {} nodes  {} directed edges",
+            nodes.len(),
+            total_edges
+        ));
+        (nodes, edges)
+    } else {
+        eprintln!("  no osm file — skipping road graph");
+        (vec![], std::collections::HashMap::new())
+    };
+
     // ---- Link stops ----
     let pb = bar(gtfs.stops.len() as u64, "linking stops to walk graph");
     let mut stop_walk_links = walk::link_stops_to_walk_graph(
@@ -190,6 +213,8 @@ fn main() -> Result<()> {
         &walk_nodes,
         &walk_edges,
         &stop_walk_links,
+        &road_nodes,
+        &road_edges,
     )
     .context("failed to build capnp message")?;
     pb.finish_with_message(format!(

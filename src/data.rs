@@ -20,6 +20,7 @@ pub struct TransitData {
     pub transfers: Vec<Transfer>,
     pub services: Vec<Service>,
     pub walk_graph: WalkGraph,
+    pub road_graph: WalkGraph,
     pub fare_rules: Vec<FareRule>,
 }
 

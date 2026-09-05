@@ -729,4 +729,27 @@ mod road_tests {
             .iter()
             .all(|&(la, lo)| !((la - 22.300).abs() < 0.0005 && (lo - 114.170).abs() < 0.0005)));
     }
+
+    #[test]
+    fn route_respects_oneway() {
+        // one-way street A -> B only
+        let dist = haversine(22.300, 114.160, 22.300, 114.170) as u16;
+        let nodes = vec![
+            WalkNode { lat: 22.300, lon: 114.160, edges_offset: 0, num_edges: 1 },
+            WalkNode { lat: 22.300, lon: 114.170, edges_offset: 0, num_edges: 0 },
+        ];
+        let edges = vec![WalkEdge {
+            to_node_idx: 1,
+            dist_meters: dist,
+            geometry_offset: 0,
+            geometry_len: 0,
+        }];
+        let mut node_grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            node_grid.entry(grid_key(n.lat, n.lon)).or_default().push(i as u32);
+        }
+        let g = WalkGraph { nodes, edges, geometry: vec![], node_grid };
+        assert!(route_waypoints(&g, &[(22.300, 114.160), (22.300, 114.170)], &[], 4000).is_some());
+        assert!(route_waypoints(&g, &[(22.300, 114.170), (22.300, 114.160)], &[], 4000).is_none());
+    }
 }

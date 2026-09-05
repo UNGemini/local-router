@@ -23,6 +23,8 @@ pub fn build_capnp(
     walk_nodes: &[WalkNode],
     walk_edges: &HashMap<u32, Vec<WalkEdge>>,
     stop_walk_links: &[u32],
+    road_nodes: &[WalkNode],
+    road_edges: &HashMap<u32, Vec<WalkEdge>>,
 ) -> Result<Vec<u8>> {
     let mut message = Builder::new(HeapAllocator::new());
     let mut root = message.init_root::<transit_data::Builder>();
@@ -273,59 +275,62 @@ pub fn build_capnp(
     }
 
     // ---- walk graph ----
-    {
-        // Build flat edge list and geometry blob.
-        // Uses Vec<u8> with extend_from_slice — O(1) amortised, no quadratic copies.
-        let mut flat_edges: Vec<(u32, u16, u32, u16)> = Vec::new(); // (to_node, dist, geom_off, geom_len)
-        let mut edge_offsets: Vec<(u32, u32)> = Vec::with_capacity(walk_nodes.len()); // (offset, count)
-        let mut flat_geometry: Vec<u8> = Vec::new(); // packed f32 lat/lon pairs
-        let mut geom_pair_offset: u32 = 0;
+    write_graph(root.reborrow().init_walk_graph(), walk_nodes, walk_edges);
 
-        for ni in 0..walk_nodes.len() as u32 {
-            let offset = flat_edges.len() as u32;
-            let node_edges = walk_edges.get(&ni).map(|v| v.as_slice()).unwrap_or(&[]);
-            edge_offsets.push((offset, node_edges.len() as u32));
-            for edge in node_edges {
-                let g_off = geom_pair_offset;
-                let g_len = edge.geometry.len() as u16;
-                for &(glat, glon) in &edge.geometry {
-                    flat_geometry.extend_from_slice(&glat.to_le_bytes());
-                    flat_geometry.extend_from_slice(&glon.to_le_bytes());
-                }
-                geom_pair_offset += g_len as u32;
-                flat_edges.push((edge.to_node_idx, edge.dist_meters, g_off, g_len));
-            }
-        }
-
-        let mut wg = root.reborrow().init_walk_graph();
-        wg.reborrow().set_geometry(&flat_geometry);
-
-        {
-            let mut wn_list = wg.reborrow().init_nodes(walk_nodes.len() as u32);
-            for (i, n) in walk_nodes.iter().enumerate() {
-                let mut entry = wn_list.reborrow().get(i as u32);
-                entry.set_lat(n.lat);
-                entry.set_lon(n.lon);
-                let (off, num) = edge_offsets.get(i).copied().unwrap_or((0, 0));
-                entry.set_edges_offset(off);
-                entry.set_num_edges(num.min(u16::MAX as u32) as u16);
-            }
-        }
-
-        {
-            let mut we_list = wg.reborrow().init_edges(flat_edges.len() as u32);
-            for (i, &(to, dist, g_off, g_len)) in flat_edges.iter().enumerate() {
-                let mut entry = we_list.reborrow().get(i as u32);
-                entry.set_to_node_idx(to);
-                entry.set_dist_meters(dist);
-                entry.set_geometry_offset(g_off);
-                entry.set_geometry_len(g_len);
-            }
-        }
-    }
+    // ---- directed vehicle road graph (road assistant) ----
+    write_graph(root.reborrow().init_road_graph(), road_nodes, road_edges);
 
     // Serialize to bytes
     let mut out: Vec<u8> = Vec::new();
     serialize::write_message(&mut out, &message)?;
     Ok(out)
+}
+
+/// Serialize one walk/road graph (nodes + flat edges + packed geometry).
+fn write_graph(
+    mut wg: transit_data::walk_graph::Builder,
+    nodes: &[WalkNode],
+    edges: &HashMap<u32, Vec<WalkEdge>>,
+) {
+    let mut flat_edges: Vec<(u32, u16, u32, u16)> = Vec::new();
+    let mut edge_offsets: Vec<(u32, u32)> = Vec::with_capacity(nodes.len());
+    let mut flat_geometry: Vec<u8> = Vec::new();
+    let mut geom_pair_offset: u32 = 0;
+
+    for ni in 0..nodes.len() as u32 {
+        let offset = flat_edges.len() as u32;
+        let node_edges = edges.get(&ni).map(|v| v.as_slice()).unwrap_or(&[]);
+        edge_offsets.push((offset, node_edges.len() as u32));
+        for edge in node_edges {
+            let g_off = geom_pair_offset;
+            let g_len = edge.geometry.len() as u16;
+            for &(glat, glon) in &edge.geometry {
+                flat_geometry.extend_from_slice(&glat.to_le_bytes());
+                flat_geometry.extend_from_slice(&glon.to_le_bytes());
+            }
+            geom_pair_offset += g_len as u32;
+            flat_edges.push((edge.to_node_idx, edge.dist_meters, g_off, g_len));
+        }
+    }
+
+    wg.reborrow().set_geometry(&flat_geometry);
+
+    let mut wn_list = wg.reborrow().init_nodes(nodes.len() as u32);
+    for (i, n) in nodes.iter().enumerate() {
+        let mut entry = wn_list.reborrow().get(i as u32);
+        entry.set_lat(n.lat);
+        entry.set_lon(n.lon);
+        let (off, num) = edge_offsets.get(i).copied().unwrap_or((0, 0));
+        entry.set_edges_offset(off);
+        entry.set_num_edges(num.min(u16::MAX as u32) as u16);
+    }
+
+    let mut we_list = wg.reborrow().init_edges(flat_edges.len() as u32);
+    for (i, &(to, dist, g_off, g_len)) in flat_edges.iter().enumerate() {
+        let mut entry = we_list.reborrow().get(i as u32);
+        entry.set_to_node_idx(to);
+        entry.set_dist_meters(dist);
+        entry.set_geometry_offset(g_off);
+        entry.set_geometry_len(g_len);
+    }
 }

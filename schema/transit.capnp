@@ -33,6 +33,9 @@ struct TransitData {
 
   # fare data (v1 style, kept simple)
   fareRules @10 :List(FareRule);
+
+  # directed vehicle road graph from osm (road assistant)
+  roadGraph @12 :WalkGraph;
 }
 
 struct Agency {

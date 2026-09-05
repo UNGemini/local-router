@@ -192,9 +192,19 @@ impl Router {
         }
     }
 
+    // street graph for the road assistant: the directed vehicle layer when
+    // the build includes one, else the pedestrian layer (older graphs)
+    fn assistant_graph(&self) -> &data::WalkGraph {
+        if !self.data.road_graph.nodes.is_empty() {
+            &self.data.road_graph
+        } else {
+            &self.data.walk_graph
+        }
+    }
+
     // snap a coordinate onto the osm walk/street graph (local road snap)
     pub fn snap_nearest(&self, lat: f64, lon: f64, max_m: f64) -> Option<walker::SnapResult> {
-        walker::snap_to_graph(&self.data.walk_graph, lat as f32, lon as f32, max_m as f32)
+        walker::snap_to_graph(self.assistant_graph(), lat as f32, lon as f32, max_m as f32)
     }
 
     // route along the osm walk/street graph through waypoints, avoiding
@@ -218,7 +228,7 @@ impl Router {
             .iter()
             .map(|(la, lo)| (*la as f32, *lo as f32))
             .collect();
-        walker::route_waypoints(&self.data.walk_graph, &wps, &blocks, max_leg_m)
+        walker::route_waypoints(self.assistant_graph(), &wps, &blocks, max_leg_m)
             .map(|path| path.into_iter().map(|(la, lo)| (la as f64, lo as f64)).collect())
     }
 }
@@ -613,6 +623,7 @@ mod tests {
             transfers: vec![],
             services,
             walk_graph: WalkGraph::default(),
+            road_graph: WalkGraph::default(),
             fare_rules: vec![],
         }
     }

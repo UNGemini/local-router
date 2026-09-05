@@ -209,6 +209,38 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
         node_grid.entry((gy, gx)).or_default().push(i as u32);
     }
 
+    // directed vehicle road graph (optional — default empty for older files)
+    let rg_reader = root.get_road_graph()?;
+    let rgwn_reader = rg_reader.get_nodes()?;
+    let mut road_nodes = Vec::with_capacity(rgwn_reader.len() as usize);
+    for n in rgwn_reader.iter() {
+        road_nodes.push(WalkNode {
+            lat: n.get_lat(),
+            lon: n.get_lon(),
+            edges_offset: n.get_edges_offset(),
+            num_edges: n.get_num_edges(),
+        });
+    }
+    let rgwe_reader = rg_reader.get_edges()?;
+    let mut road_edges = Vec::with_capacity(rgwe_reader.len() as usize);
+    for e in rgwe_reader.iter() {
+        road_edges.push(WalkEdge {
+            to_node_idx: e.get_to_node_idx(),
+            dist_meters: e.get_dist_meters(),
+            geometry_offset: e.get_geometry_offset(),
+            geometry_len: e.get_geometry_len(),
+        });
+    }
+    let road_geom_data = rg_reader.get_geometry()?;
+    let road_geometry = unpack_geometry(road_geom_data);
+    let mut road_grid: std::collections::HashMap<(i32, i32), Vec<u32>> =
+        std::collections::HashMap::with_capacity(road_nodes.len() / 4);
+    for (i, n) in road_nodes.iter().enumerate() {
+        let gy = (n.lat / GRID_CELL) as i32;
+        let gx = (n.lon / GRID_CELL) as i32;
+        road_grid.entry((gy, gx)).or_default().push(i as u32);
+    }
+
     Ok(TransitData {
         feed_id,
         timezone,
@@ -225,6 +257,12 @@ pub fn load(bytes: &[u8]) -> Result<TransitData, capnp::Error> {
             edges: walk_edges,
             geometry,
             node_grid,
+        },
+        road_graph: WalkGraph {
+            nodes: road_nodes,
+            edges: road_edges,
+            geometry: road_geometry,
+            node_grid: road_grid,
         },
         fare_rules,
     })
