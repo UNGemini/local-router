@@ -9,6 +9,7 @@ use crate::gtfs::{EncodedService, GtfsData, RoutePattern, NOT_SET};
 use crate::osm::{WalkEdge, WalkNode};
 use crate::transfers::Transfer;
 use crate::transit_capnp::transit_data;
+use crate::transit_capnp::walk_graph;
 use anyhow::Result;
 use capnp::message::{Builder, HeapAllocator};
 use capnp::serialize;
@@ -288,7 +289,7 @@ pub fn build_capnp(
 
 /// Serialize one walk/road graph (nodes + flat edges + packed geometry).
 fn write_graph(
-    mut wg: transit_data::walk_graph::Builder,
+    mut wg: walk_graph::Builder,
     nodes: &[WalkNode],
     edges: &HashMap<u32, Vec<WalkEdge>>,
 ) {

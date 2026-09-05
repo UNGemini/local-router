@@ -289,7 +289,7 @@ fn load_osm_pbf(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                         _ => {}
                     }
                 }
-                let hw = hw.unwrap_or("");
+                let hw = hw.as_deref().unwrap_or("");
                 if !is_walkable(hw) || foot_no || access_private {
                     return;
                 }
