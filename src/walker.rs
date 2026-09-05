@@ -1,9 +1,10 @@
 // pedestrian routing using dijkstra on the osm walk graph
 // used for first/last mile walking from origin/destination to transit stops
 
-use crate::data::{WalkGraph, NOT_SET};
+use crate::data::{WalkEdge, WalkGraph, NOT_SET};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::collections::HashSet;
 
 pub const DEFAULT_WALK_SPEED_MPS: f32 = 1.2;
 const EARTH_RADIUS: f32 = 6_371_000.0;
@@ -384,5 +385,348 @@ pub fn reachable_stops_from_coord(
         stops: reachable,
         dijk: Some(dijk),
         start_node: Some(start),
+    }
+}
+
+// ── Road assistant extensions ────────────────────────────────────────────────
+// Snap + waypoint routing over the OSM walk/street graph. Exposed to wasm so
+// the app's road assistant (follow roads / recalculate) works fully locally;
+// the online OSRM proxy stays as the fallback.
+
+/// A point the route must keep away from (junction blocker).
+pub struct Blocker {
+    pub lat: f32,
+    pub lon: f32,
+    pub radius_m: f32,
+}
+
+impl Blocker {
+    fn hits(&self, lat: f32, lon: f32) -> bool {
+        haversine(lat, lon, self.lat, self.lon) <= self.radius_m
+    }
+}
+
+/// project (lat, lon) onto segment a→b in local equirectangular metres
+/// returns (dist_m, lat, lon) of the closest point
+fn project_segment(
+    lat: f32,
+    lon: f32,
+    alat: f32,
+    alon: f32,
+    blat: f32,
+    blon: f32,
+) -> (f32, f32, f32) {
+    let mlat = ((lat + alat + blat) / 3.0).to_radians();
+    let m_per_deg_lat = 111_320.0f32;
+    let m_per_deg_lon = 111_320.0 * mlat.cos();
+    let px = (lon - alon) * m_per_deg_lon;
+    let py = (lat - alat) * m_per_deg_lat;
+    let bx = (blon - alon) * m_per_deg_lon;
+    let by = (blat - alat) * m_per_deg_lat;
+    let len2 = bx * bx + by * by;
+    let t = if len2 < 1e-9 {
+        0.0
+    } else {
+        ((px * bx + py * by) / len2).clamp(0.0, 1.0)
+    };
+    let dx = px - t * bx;
+    let dy = py - t * by;
+    let dist = (dx * dx + dy * dy).sqrt();
+    (dist, alat + t * (blat - alat), alon + t * (blon - alon))
+}
+
+/// result of snapping a coordinate onto the walk/street graph
+pub struct SnapResult {
+    pub lat: f32,
+    pub lon: f32,
+    /// distance from the query point to the snapped position (metres)
+    pub dist_m: f32,
+}
+
+/// Snap a coordinate onto the nearest walk/street edge (endpoints + packed
+/// geometry), scanning spatial-grid cells outward like `nearest_node`.
+pub fn snap_to_graph(
+    graph: &WalkGraph,
+    lat: f32,
+    lon: f32,
+    max_dist_m: f32,
+) -> Option<SnapResult> {
+    if graph.nodes.is_empty() {
+        return None;
+    }
+    let (gy, gx) = grid_key(lat, lon);
+    let mut best: Option<SnapResult> = None;
+    let mut seen_edges: HashSet<(u32, u32)> = HashSet::new();
+    for radius in [1i32, 2, 4, 8] {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let cells = match graph.node_grid.get(&(gy + dy, gx + dx)) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                for &ni in cells {
+                    let n = &graph.nodes[ni as usize];
+                    let d = haversine(lat, lon, n.lat, n.lon);
+                    if d <= max_dist_m && best.as_ref().map_or(true, |b| d < b.dist_m) {
+                        best = Some(SnapResult {
+                            lat: n.lat,
+                            lon: n.lon,
+                            dist_m: d,
+                        });
+                    }
+                    // project onto incident edge geometry (each edge once)
+                    let edges_start = n.edges_offset as usize;
+                    let edges_end = edges_start + n.num_edges as usize;
+                    for e in &graph.edges[edges_start..edges_end] {
+                        let key = (ni.min(e.to_node_idx), ni.max(e.to_node_idx));
+                        if !seen_edges.insert(key) {
+                            continue;
+                        }
+                        let to = &graph.nodes[e.to_node_idx as usize];
+                        let mut prev = (n.lat, n.lon);
+                        let gstart = e.geometry_offset as usize;
+                        let gend =
+                            (gstart + e.geometry_len as usize).min(graph.geometry.len());
+                        for &(glat, glon) in &graph.geometry[gstart..gend] {
+                            let (d2, clat, clon) =
+                                project_segment(lat, lon, prev.0, prev.1, glat, glon);
+                            if d2 <= max_dist_m
+                                && best.as_ref().map_or(true, |b| d2 < b.dist_m)
+                            {
+                                best = Some(SnapResult {
+                                    lat: clat,
+                                    lon: clon,
+                                    dist_m: d2,
+                                });
+                            }
+                            prev = (glat, glon);
+                        }
+                        let (d2, clat, clon) =
+                            project_segment(lat, lon, prev.0, prev.1, to.lat, to.lon);
+                        if d2 <= max_dist_m && best.as_ref().map_or(true, |b| d2 < b.dist_m) {
+                            best = Some(SnapResult {
+                                lat: clat,
+                                lon: clon,
+                                dist_m: d2,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // tight snap inside the scanned band — stop widening the search
+        if let Some(b) = &best {
+            if b.dist_m < 25.0 {
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// does this edge (endpoints + packed geometry) pass near any blocker?
+fn edge_blocked(graph: &WalkGraph, from_node: u32, e: &WalkEdge, blockers: &[Blocker]) -> bool {
+    if blockers.is_empty() {
+        return false;
+    }
+    let from = &graph.nodes[from_node as usize];
+    let to = &graph.nodes[e.to_node_idx as usize];
+    for b in blockers {
+        if b.hits(from.lat, from.lon) || b.hits(to.lat, to.lon) {
+            return true;
+        }
+    }
+    if e.geometry_len > 0 {
+        let gstart = e.geometry_offset as usize;
+        let gend = (gstart + e.geometry_len as usize).min(graph.geometry.len());
+        for &(glat, glon) in &graph.geometry[gstart..gend] {
+            for b in blockers {
+                if b.hits(glat, glon) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// dijkstra that skips edges passing near any blocker
+pub fn dijkstra_avoiding(
+    graph: &WalkGraph,
+    start: u32,
+    max_dist: u32,
+    walk_speed: f32,
+    blockers: &[Blocker],
+) -> DijkstraResult {
+    let n = graph.nodes.len();
+    let mut dist = vec![u32::MAX; n];
+    let mut parent = vec![u32::MAX; n];
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    dist[start as usize] = 0;
+    heap.push(Reverse((0, start)));
+    while let Some(Reverse((d, node))) = heap.pop() {
+        if d > max_dist {
+            break;
+        }
+        if d > dist[node as usize] {
+            continue;
+        }
+        let wn = &graph.nodes[node as usize];
+        let edges_start = wn.edges_offset as usize;
+        let edges_end = edges_start + wn.num_edges as usize;
+        for e in &graph.edges[edges_start..edges_end] {
+            if edge_blocked(graph, node, e, blockers) {
+                continue;
+            }
+            let new_dist = d + e.dist_meters as u32;
+            if new_dist < dist[e.to_node_idx as usize] && new_dist <= max_dist {
+                dist[e.to_node_idx as usize] = new_dist;
+                parent[e.to_node_idx as usize] = node;
+                heap.push(Reverse((new_dist, e.to_node_idx)));
+            }
+        }
+    }
+    DijkstraResult {
+        dist,
+        parent,
+        start,
+        walk_speed,
+    }
+}
+
+/// route along the walk/street graph through waypoints, keeping away from
+/// blockers. Each consecutive pair is a radius-bounded dijkstra; contracted
+/// edge geometry is included in the result. None when any leg fails.
+pub fn route_waypoints(
+    graph: &WalkGraph,
+    waypoints: &[(f32, f32)],
+    blockers: &[Blocker],
+    max_leg_m: u32,
+) -> Option<Vec<(f32, f32)>> {
+    if waypoints.len() < 2 || graph.nodes.is_empty() {
+        return None;
+    }
+    let mut out: Vec<(f32, f32)> = vec![waypoints[0]];
+    for w in waypoints.windows(2) {
+        let (lat1, lon1) = w[0];
+        let (lat2, lon2) = w[1];
+        let start = nearest_node(graph, lat1, lon1)?;
+        let end = nearest_node(graph, lat2, lon2)?;
+        // graph detours run ~1.3–1.5× haversine — search wider
+        let search = max_leg_m.saturating_add(max_leg_m / 2).min(40_000);
+        let dijk = if blockers.is_empty() {
+            dijkstra(graph, start, search, DEFAULT_WALK_SPEED_MPS)
+        } else {
+            dijkstra_avoiding(graph, start, search, DEFAULT_WALK_SPEED_MPS, blockers)
+        };
+        if dijk.dist[end as usize] == u32::MAX {
+            return None;
+        }
+        let mut coords = dijk.path_coords(graph, end);
+        if coords.is_empty() {
+            return None;
+        }
+        coords.insert(0, (lat1, lon1));
+        coords.push((lat2, lon2));
+        for c in coords {
+            match out.last() {
+                Some(last) if haversine(last.0, last.1, c.0, c.1) < 0.5 => continue,
+                _ => out.push(c),
+            }
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod road_tests {
+    use super::*;
+    use crate::data::{WalkEdge, WalkGraph, WalkNode};
+    use std::collections::HashMap;
+
+    /// two parallel E-W roads linked in the middle:
+    ///   A(22.300,114.160) - B(22.300,114.165) - C(22.300,114.170)
+    ///   D(22.304,114.165) - E(22.304,114.170), connector B-D
+    fn build_graph() -> WalkGraph {
+        let mut nodes = vec![
+            WalkNode { lat: 22.300, lon: 114.160, edges_offset: 0, num_edges: 0 },
+            WalkNode { lat: 22.300, lon: 114.165, edges_offset: 0, num_edges: 0 },
+            WalkNode { lat: 22.300, lon: 114.170, edges_offset: 0, num_edges: 0 },
+            WalkNode { lat: 22.304, lon: 114.165, edges_offset: 0, num_edges: 0 },
+            WalkNode { lat: 22.304, lon: 114.170, edges_offset: 0, num_edges: 0 },
+        ];
+        let pairs: Vec<(usize, usize)> = vec![(0, 1), (1, 2), (1, 3), (3, 4)];
+        let mut adj: Vec<Vec<WalkEdge>> = vec![Vec::new(); nodes.len()];
+        for (a, b) in &pairs {
+            let d =
+                haversine(nodes[*a].lat, nodes[*a].lon, nodes[*b].lat, nodes[*b].lon) as u16;
+            adj[*a].push(WalkEdge {
+                to_node_idx: *b as u32,
+                dist_meters: d,
+                geometry_offset: 0,
+                geometry_len: 0,
+            });
+            adj[*b].push(WalkEdge {
+                to_node_idx: *a as u32,
+                dist_meters: d,
+                geometry_offset: 0,
+                geometry_len: 0,
+            });
+        }
+        let mut flat: Vec<WalkEdge> = Vec::new();
+        for (i, list) in adj.iter().enumerate() {
+            nodes[i].edges_offset = flat.len() as u32;
+            nodes[i].num_edges = list.len() as u16;
+            flat.extend_from_slice(list);
+        }
+        let mut node_grid: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            node_grid.entry(grid_key(n.lat, n.lon)).or_default().push(i as u32);
+        }
+        WalkGraph {
+            nodes,
+            edges: flat,
+            geometry: vec![],
+            node_grid,
+        }
+    }
+
+    #[test]
+    fn snap_finds_nearby_edge() {
+        let g = build_graph();
+        let s = snap_to_graph(&g, 22.3005, 114.1625, 200.0)
+            .expect("snap should land on the A-B road");
+        assert!(s.dist_m < 60.0, "dist {}", s.dist_m);
+    }
+
+    #[test]
+    fn route_waypoints_follows_roads() {
+        let g = build_graph();
+        let path = route_waypoints(&g, &[(22.300, 114.160), (22.300, 114.170)], &[], 4000)
+            .expect("A to C should route");
+        assert!(path.len() >= 3);
+    }
+
+    #[test]
+    fn route_avoids_blocker() {
+        let g = build_graph();
+        // blocker on node C kills every path touching C
+        let blockers = vec![Blocker {
+            lat: 22.300,
+            lon: 114.170,
+            radius_m: 80.0,
+        }];
+        assert!(route_waypoints(&g, &[(22.300, 114.160), (22.300, 114.170)], &blockers, 4000)
+            .is_none());
+        // north detour A-B-D-E still exists and never touches C
+        let detour =
+            route_waypoints(&g, &[(22.300, 114.160), (22.304, 114.170)], &blockers, 8000)
+                .expect("A to E should detour via D");
+        assert!(detour
+            .iter()
+            .any(|&(la, lo)| (la - 22.304).abs() < 0.001 && (lo - 114.165).abs() < 0.001));
+        assert!(detour
+            .iter()
+            .all(|&(la, lo)| !((la - 22.300).abs() < 0.0005 && (lo - 114.170).abs() < 0.0005)));
     }
 }

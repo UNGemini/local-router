@@ -191,6 +191,36 @@ impl Router {
             routes,
         }
     }
+
+    // snap a coordinate onto the osm walk/street graph (local road snap)
+    pub fn snap_nearest(&self, lat: f64, lon: f64, max_m: f64) -> Option<walker::SnapResult> {
+        walker::snap_to_graph(&self.data.walk_graph, lat as f32, lon as f32, max_m as f32)
+    }
+
+    // route along the osm walk/street graph through waypoints, avoiding
+    // blockers. returns the road path, or None when a leg can't be routed.
+    pub fn road_route(
+        &self,
+        waypoints: &[(f64, f64)],
+        blockers: &[(f64, f64)],
+        avoid_radius_m: f64,
+        max_leg_m: u32,
+    ) -> Option<Vec<(f64, f64)>> {
+        let blocks: Vec<walker::Blocker> = blockers
+            .iter()
+            .map(|(la, lo)| walker::Blocker {
+                lat: *la as f32,
+                lon: *lo as f32,
+                radius_m: avoid_radius_m as f32,
+            })
+            .collect();
+        let wps: Vec<(f32, f32)> = waypoints
+            .iter()
+            .map(|(la, lo)| (*la as f32, *lo as f32))
+            .collect();
+        walker::route_waypoints(&self.data.walk_graph, &wps, &blocks, max_leg_m)
+            .map(|path| path.into_iter().map(|(la, lo)| (la as f64, lo as f64)).collect())
+    }
 }
 
 // structured stats response
@@ -367,6 +397,99 @@ mod wasm {
             let viz = self.inner.plan_viz(&req);
             serde_wasm_bindgen::to_value(&viz)
                 .map_err(|e| JsError::new(&format!("serialization error: {}", e)))
+        }
+
+        // snap a coordinate onto the osm walk/street graph (fully local).
+        // request: { lat, lon, maxM? } → { ok, lat, lon, distM }
+        pub fn snap(&self, request: JsValue) -> Result<JsValue, JsError> {
+            #[derive(serde::Deserialize)]
+            struct SnapInput {
+                lat: f64,
+                lon: f64,
+                #[serde(rename = "maxM", default)]
+                max_m: Option<f64>,
+            }
+            #[derive(serde::Serialize)]
+            #[allow(non_snake_case)]
+            struct SnapOut {
+                ok: bool,
+                lat: f64,
+                lon: f64,
+                distM: f64,
+            }
+            let input: SnapInput = serde_wasm_bindgen::from_value(request)
+                .map_err(|e| JsError::new(&format!("invalid request: {}", e)))?;
+            let out = match self
+                .inner
+                .snap_nearest(input.lat, input.lon, input.max_m.unwrap_or(150.0))
+            {
+                Some(s) => SnapOut {
+                    ok: true,
+                    lat: s.lat as f64,
+                    lon: s.lon as f64,
+                    distM: s.dist_m as f64,
+                },
+                None => SnapOut {
+                    ok: false,
+                    lat: input.lat,
+                    lon: input.lon,
+                    distM: f64::INFINITY,
+                },
+            };
+            serde_wasm_bindgen::to_value(&out)
+                .map_err(|e| JsError::new(&format!("serialization error: {}", e)))
+        }
+
+        // route along the osm walk/street graph through waypoints, avoiding
+        // blockers (fully local).
+        // request: { waypoints: [[lat,lon]…], avoid?: [[lat,lon]…],
+        //            avoidRadiusM?, maxLegM? } → { ok, path, meters } | { ok: false }
+        pub fn road_route(&self, request: JsValue) -> Result<JsValue, JsError> {
+            #[derive(serde::Deserialize)]
+            struct RouteInput {
+                waypoints: Vec<(f64, f64)>,
+                #[serde(default)]
+                avoid: Vec<(f64, f64)>,
+                #[serde(rename = "avoidRadiusM", default)]
+                avoid_radius_m: Option<f64>,
+                #[serde(rename = "maxLegM", default)]
+                max_leg_m: Option<u32>,
+            }
+            let input: RouteInput = serde_wasm_bindgen::from_value(request)
+                .map_err(|e| JsError::new(&format!("invalid request: {}", e)))?;
+            match self.inner.road_route(
+                &input.waypoints,
+                &input.avoid,
+                input.avoid_radius_m.unwrap_or(40.0),
+                input.max_leg_m.unwrap_or(4000),
+            ) {
+                Some(path) => {
+                    let meters: f64 = path
+                        .windows(2)
+                        .map(|w| {
+                            walker::haversine(
+                                w[0].0 as f32,
+                                w[0].1 as f32,
+                                w[1].0 as f32,
+                                w[1].1 as f32,
+                            ) as f64
+                        })
+                        .sum();
+                    #[derive(serde::Serialize)]
+                    struct RouteOut {
+                        ok: bool,
+                        path: Vec<(f64, f64)>,
+                        meters: f64,
+                    }
+                    serde_wasm_bindgen::to_value(&RouteOut {
+                        ok: true,
+                        path,
+                        meters,
+                    })
+                }
+                None => serde_wasm_bindgen::to_value(&serde_json::json!({ "ok": false })),
+            }
+            .map_err(|e| JsError::new(&format!("serialization error: {}", e)))
         }
     }
 }
