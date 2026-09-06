@@ -474,11 +474,7 @@ pub fn build_walk_graph(
 /// Same shape as the walk graph so routing code is shared; edges are stored
 /// one-way per OSM direction, one edge per OSM node pair (no contraction —
 /// the dense segmentation is what gives the road assistant its precision).
-pub fn build_road_graph(
-    osm_path: &Path,
-    stop_coords: &[(f64, f64)],
-    max_radius: f64,
-) -> Result<(Vec<WalkNode>, HashMap<u32, Vec<WalkEdge>>)> {
+pub fn build_road_graph(osm_path: &Path) -> Result<(Vec<WalkNode>, HashMap<u32, Vec<WalkEdge>>)> {
     let (node_coords, ways) = if is_osm_xml(osm_path) {
         load_osm_xml(osm_path)?
     } else {
@@ -529,61 +525,12 @@ pub fn build_road_graph(
         }
     }
 
-    // --- Prune nodes far from any transit stop (same rule as walk graph) ---
-    if !stop_coords.is_empty() {
-        const GRID_SIZE: f64 = 0.005; // ~550m
-        let mut stop_grid: HashMap<(i32, i32), Vec<(f64, f64)>> = HashMap::new();
-        for &(slat, slon) in stop_coords {
-            let gx = (slon / GRID_SIZE) as i32;
-            let gy = (slat / GRID_SIZE) as i32;
-            stop_grid.entry((gx, gy)).or_default().push((slat, slon));
-        }
-        let radius_cells = ((max_radius / 550.0).ceil() as i32).max(1);
-
-        let mut keep: HashSet<u32> = HashSet::new();
-        for (ni, n) in nodes.iter().enumerate() {
-            let nlat = n.lat as f64;
-            let nlon = n.lon as f64;
-            let gx = (nlon / GRID_SIZE) as i32;
-            let gy = (nlat / GRID_SIZE) as i32;
-            'outer: for dx in -radius_cells..=radius_cells {
-                for dy in -radius_cells..=radius_cells {
-                    if let Some(cell) = stop_grid.get(&(gx + dx, gy + dy)) {
-                        for &(slat, slon) in cell {
-                            if haversine(nlat, nlon, slat, slon) <= max_radius {
-                                keep.insert(ni as u32);
-                                break 'outer;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if keep.len() < nodes.len() {
-            let mut sorted_keep: Vec<u32> = keep.into_iter().collect();
-            sorted_keep.sort_unstable();
-            let mut old_to_new: HashMap<u32, u32> = HashMap::with_capacity(sorted_keep.len());
-            let mut new_nodes: Vec<WalkNode> = Vec::with_capacity(sorted_keep.len());
-            for &old_i in &sorted_keep {
-                old_to_new.insert(old_i, new_nodes.len() as u32);
-                new_nodes.push(nodes[old_i as usize]);
-            }
-            let mut new_edge_list: HashMap<u32, Vec<(u32, u16)>> = HashMap::new();
-            for &old_i in &sorted_keep {
-                if let Some(edges) = edge_list.get(&old_i) {
-                    let new_i = old_to_new[&old_i];
-                    for &(old_to, dist) in edges {
-                        if let Some(&new_to) = old_to_new.get(&old_to) {
-                            new_edge_list.entry(new_i).or_default().push((new_to, dist));
-                        }
-                    }
-                }
-            }
-            nodes = new_nodes;
-            edge_list = new_edge_list;
-        }
-    }
+    // --- No stop-proximity pruning for the road graph ---
+    // The road assistant reroutes bus corridors, which cross stretches with
+    // no stops for kilometres (Lantau link roads, harbour tunnels, highway
+    // lanes). Pruning to a stop radius cut those ways out and left gaps the
+    // local engine couldn't route. The vehicle network is small enough to
+    // embed whole; the pedestrian graph keeps its stop-radius pruning.
 
     let final_edges: HashMap<u32, Vec<WalkEdge>> = edge_list
         .into_iter()

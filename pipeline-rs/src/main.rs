@@ -127,19 +127,15 @@ fn main() -> Result<()> {
     };
 
     // ---- OSM directed road graph (vehicle profile for the road assistant) ----
+    // Full vehicle network, unpruned — stop-radius pruning cut inter-stop
+    // stretches (Lantau link roads, harbour tunnels) out of the graph.
     let (road_nodes, road_edges) = if let Some(osm_path) = &args.osm {
         let pb = spinner("reading osm road graph");
-        let stop_coords: Vec<(f64, f64)> = gtfs
-            .stops
-            .iter()
-            .filter(|s| s.location_type <= 2)
-            .map(|s| (s.stop_lat as f64, s.stop_lon as f64))
-            .collect();
-        let (nodes, edges) = osm::build_road_graph(osm_path, &stop_coords, 2000.0)
+        let (nodes, edges) = osm::build_road_graph(osm_path)
             .context("failed to build road graph")?;
         let total_edges: usize = edges.values().map(|v| v.len()).sum();
         pb.finish_with_message(format!(
-            "road graph  {} nodes  {} directed edges",
+            "road graph  {} nodes  {} directed edges (full network)",
             nodes.len(),
             total_edges
         ));
