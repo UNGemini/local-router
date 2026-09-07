@@ -69,6 +69,8 @@ struct WalkWay {
     node_refs: Vec<i64>,
     is_pedestrian: bool,
     penalty: u32,
+    /// pedestrian-graph usable (walk classes + foot/access ok)
+    walk_ok: bool,
     /// vehicle-usable road (directed road graph source)
     is_vehicle: bool,
     /// 1 = forward only, -1 = reverse only, 0 = both directions
@@ -221,15 +223,23 @@ fn load_osm_xml(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                 if e.name().as_ref() == b"way" && in_way {
                     in_way = false;
                     if let Some(hw) = way_highway.take() {
-                        if is_walkable(&hw) && !way_foot_no && !way_access_private {
+                        // A way qualifies for the pedestrian layer (walk
+                        // classes) or the vehicle layer (motorways etc.) —
+                        // gating vehicle-only ways out here silently dropped
+                        // every motorway from the road graph.
+                        let walk_ok =
+                            is_walkable(&hw) && !way_foot_no && !way_access_private;
+                        let is_vehicle =
+                            is_vehicle_class(&hw) && !way_motor_no && !way_access_private;
+                        if walk_ok || is_vehicle {
                             let is_ped = is_pedestrian_priority(&hw);
                             let penalty = if is_ped { 1 } else { ROAD_PENALTY };
-                            let is_vehicle = is_vehicle_class(&hw) && !way_motor_no;
                             if way_node_refs.len() >= 2 {
                                 ways.push(WalkWay {
                                     node_refs: way_node_refs.clone(),
                                     is_pedestrian: is_ped,
                                     penalty,
+                                    walk_ok,
                                     is_vehicle,
                                     oneway: way_oneway,
                                 });
@@ -290,7 +300,10 @@ fn load_osm_pbf(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                     }
                 }
                 let hw = hw.as_deref().unwrap_or("");
-                if !is_walkable(hw) || foot_no || access_private {
+                let walk_ok = is_walkable(hw) && !foot_no && !access_private;
+                let is_vehicle =
+                    is_vehicle_class(hw) && !motor_no && !access_private;
+                if !walk_ok && !is_vehicle {
                     return;
                 }
                 let is_ped = is_pedestrian_priority(hw);
@@ -301,7 +314,8 @@ fn load_osm_pbf(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                         node_refs,
                         is_pedestrian: is_ped,
                         penalty,
-                        is_vehicle: is_vehicle_class(hw) && !motor_no,
+                        walk_ok,
+                        is_vehicle,
                         oneway,
                     });
                 }
@@ -327,6 +341,9 @@ pub fn build_walk_graph(
     // Build compact node index (only nodes referenced by walkable ways)
     let mut used_nodes: HashSet<i64> = HashSet::new();
     for way in &ways {
+        if !way.walk_ok {
+            continue;
+        }
         for &nref in &way.node_refs {
             used_nodes.insert(nref);
         }
@@ -350,6 +367,9 @@ pub fn build_walk_graph(
     let mut pedestrian_node_set: HashSet<u32> = HashSet::new();
 
     for way in &ways {
+        if !way.walk_ok {
+            continue; // motorway-only ways belong to the road graph only
+        }
         for k in 0..way.node_refs.len() - 1 {
             let a = way.node_refs[k];
             let b = way.node_refs[k + 1];
