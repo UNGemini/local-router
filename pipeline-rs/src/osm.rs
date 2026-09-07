@@ -552,6 +552,84 @@ pub fn build_road_graph(osm_path: &Path) -> Result<(Vec<WalkNode>, HashMap<u32, 
     // local engine couldn't route. The vehicle network is small enough to
     // embed whole; the pedestrian graph keeps its stop-radius pruning.
 
+    // --- Topology repair: stitch dangling way-ends ---
+    // OSM continuations frequently don't share nodes (Tong Yan San Tsuen
+    // Interchange / Lam Yu Road are chopped into one-way stubs whose ends sit
+    // metres apart), which bisects the graph at editor seams. Bridge pairs of
+    // low-degree ends within a short radius; genuine dead ends have no nearby
+    // partner and stay untouched.
+    {
+        let n = nodes.len();
+        let mut out_deg = vec![0u32; n];
+        let mut in_deg = vec![0u32; n];
+        for (ni, edges) in &edge_list {
+            out_deg[*ni as usize] += edges.len() as u32;
+            for (to, _) in edges {
+                in_deg[*to as usize] += 1;
+            }
+        }
+        // chain ends: total degree <= 1
+        let mut ends: Vec<u32> = Vec::new();
+        for ni in 0..n as u32 {
+            if out_deg[ni as usize] + in_deg[ni as usize] <= 1 {
+                ends.push(ni);
+            }
+        }
+        // bucket ends on a ~45 m grid and pair neighbours greedily
+        const STITCH_RADIUS_M: f64 = 30.0;
+        const CELL: f64 = 0.0004;
+        let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (idx, ni) in ends.iter().enumerate() {
+            let node = &nodes[*ni as usize];
+            grid.entry((
+                (node.lat as f64 / CELL) as i32,
+                (node.lon as f64 / CELL) as i32,
+            ))
+                .or_default()
+                .push(idx);
+        }
+        let mut used = vec![false; ends.len()];
+        let mut stitched = 0usize;
+        for (idx, ni) in ends.iter().enumerate() {
+            if used[idx] {
+                continue;
+            }
+            let node = &nodes[*ni as usize];
+            let gy = (node.lat as f64 / CELL) as i32;
+            let gx = (node.lon as f64 / CELL) as i32;
+            let mut best: Option<(usize, f64)> = None;
+            for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    if let Some(list) = grid.get(&(gy + dy, gx + dx)) {
+                        for &j in list {
+                            if j == idx || used[j] {
+                                continue;
+                            }
+                            let other = &nodes[ends[j] as usize];
+                            let d = haversine(node.lat as f64, node.lon as f64, other.lat as f64, other.lon as f64);
+                            if d <= STITCH_RADIUS_M && best.map_or(true, |(_, bd)| d < bd) {
+                                best = Some((j, d));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((j, d)) = best {
+                used[idx] = true;
+                used[j] = true;
+                let a = *ni;
+                let b = ends[j];
+                let dm = (d as u16).max(1);
+                edge_list.entry(a).or_default().push((b, dm));
+                edge_list.entry(b).or_default().push((a, dm));
+                stitched += 1;
+            }
+        }
+        if stitched > 0 {
+            eprintln!("  stitched {} way-end gaps ({} dangling ends)", stitched, ends.len());
+        }
+    }
+
     let final_edges: HashMap<u32, Vec<WalkEdge>> = edge_list
         .into_iter()
         .map(|(ni, edges)| {
