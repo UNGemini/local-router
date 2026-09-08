@@ -594,9 +594,183 @@ pub fn dijkstra_avoiding(
     }
 }
 
+/// chain of positions from node a to node b (packed geometry when present)
+fn edge_chain(graph: &WalkGraph, a: u32, b: u32) -> Vec<(f32, f32)> {
+    let na = &graph.nodes[a as usize];
+    let mut chain = vec![(na.lat, na.lon)];
+    let edges_start = na.edges_offset as usize;
+    let edges_end = edges_start + na.num_edges as usize;
+    for e in &graph.edges[edges_start..edges_end] {
+        if e.to_node_idx == b {
+            let gstart = e.geometry_offset as usize;
+            let gend = (gstart + e.geometry_len as usize).min(graph.geometry.len());
+            chain.extend_from_slice(&graph.geometry[gstart..gend]);
+            break;
+        }
+    }
+    let nb = &graph.nodes[b as usize];
+    chain.push((nb.lat, nb.lon));
+    chain
+}
+
+/// a waypoint projected onto the road graph, keeping enough context to
+/// splice the output path along road geometry instead of out to the raw
+/// (often off-road) coordinate
+struct WaypointSnap {
+    /// projected position on the road — the line passes through this
+    lat: f32,
+    lon: f32,
+    #[allow(dead_code)]
+    dist_m: f32,
+    /// dijkstra endpoint node (nearer edge endpoint, or the snapped node)
+    node: u32,
+    /// other endpoint of the snapped edge (u32::MAX when snapped on a node)
+    edge_other: u32,
+    /// positions from `node` toward `edge_other`; projection sits between
+    /// chain[seg] and chain[seg + 1]
+    chain: Vec<(f32, f32)>,
+    seg: usize,
+}
+
+const WAYPOINT_SNAP_MAX_M: f32 = 120.0;
+
+/// project a waypoint onto the nearest road edge — like `snap_to_graph`
+/// but keeping the edge endpoints and segment index for splicing
+fn snap_waypoint(graph: &WalkGraph, lat: f32, lon: f32) -> Option<WaypointSnap> {
+    if graph.nodes.is_empty() {
+        return None;
+    }
+    let (gy, gx) = grid_key(lat, lon);
+    let mut best: Option<WaypointSnap> = None;
+    let mut seen: HashSet<(u32, u32)> = HashSet::new();
+    for radius in [1i32, 2, 4, 8] {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let cells = match graph.node_grid.get(&(gy + dy, gx + dx)) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                for &ni in cells {
+                    let n = &graph.nodes[ni as usize];
+                    let d = haversine(lat, lon, n.lat, n.lon);
+                    if d <= WAYPOINT_SNAP_MAX_M
+                        && best.as_ref().map_or(true, |b| d < b.dist_m)
+                    {
+                        best = Some(WaypointSnap {
+                            lat: n.lat,
+                            lon: n.lon,
+                            dist_m: d,
+                            node: ni,
+                            edge_other: u32::MAX,
+                            chain: vec![(n.lat, n.lon)],
+                            seg: 0,
+                        });
+                    }
+                    let edges_start = n.edges_offset as usize;
+                    let edges_end = edges_start + n.num_edges as usize;
+                    for e in &graph.edges[edges_start..edges_end] {
+                        if !seen.insert((ni.min(e.to_node_idx), ni.max(e.to_node_idx))) {
+                            continue;
+                        }
+                        let to = e.to_node_idx;
+                        let gstart = e.geometry_offset as usize;
+                        let gend =
+                            (gstart + e.geometry_len as usize).min(graph.geometry.len());
+                        let mut chain = vec![(n.lat, n.lon)];
+                        chain.extend_from_slice(&graph.geometry[gstart..gend]);
+                        let tn = &graph.nodes[to as usize];
+                        chain.push((tn.lat, tn.lon));
+
+                        let mut prev = (n.lat, n.lon);
+                        for (i, &pt) in chain.iter().enumerate().skip(1) {
+                            let (d2, clat, clon) =
+                                project_segment(lat, lon, prev.0, prev.1, pt.0, pt.1);
+                            if d2 <= WAYPOINT_SNAP_MAX_M
+                                && best.as_ref().map_or(true, |b| d2 < b.dist_m)
+                            {
+                                // orient the chain from the nearer endpoint
+                                let dn = haversine(clat, clon, chain[0].0, chain[0].1);
+                                let df = haversine(
+                                    clat,
+                                    clon,
+                                    chain[chain.len() - 1].0,
+                                    chain[chain.len() - 1].1,
+                                );
+                                let (node, edge_other, ochain, seg) = if dn <= df {
+                                    (ni, to, chain.clone(), i - 1)
+                                } else {
+                                    (
+                                        to,
+                                        ni,
+                                        chain.iter().rev().cloned().collect(),
+                                        chain.len() - i,
+                                    )
+                                };
+                                best = Some(WaypointSnap {
+                                    lat: clat,
+                                    lon: clon,
+                                    dist_m: d2,
+                                    node,
+                                    edge_other,
+                                    chain: ochain,
+                                    seg,
+                                });
+                            }
+                            prev = (pt.0, pt.1);
+                        }
+                    }
+                }
+            }
+            if let Some(b) = &best {
+                if b.dist_m < 25.0 {
+                    break;
+                }
+            }
+        }
+        // the labelled `break` above only exits the inner loop; re-check here
+        if let Some(b) = &best {
+            if b.dist_m < 25.0 {
+                break;
+            }
+        }
+    }
+    best
+}
+
+/// road positions between a snap's projection and its node (along the edge,
+/// never straight-line). `to_node` = travelling projection → node.
+fn partial_points(
+    graph: &WalkGraph,
+    s: &WaypointSnap,
+    to_node: bool,
+    blockers: &[Blocker],
+) -> Vec<(f32, f32)> {
+    if s.edge_other == u32::MAX {
+        return vec![];
+    }
+    let chain = edge_chain(graph, s.node, s.edge_other);
+    let proj = (s.lat, s.lon);
+    let mut pts: Vec<(f32, f32)> = if to_node {
+        let mut v: Vec<(f32, f32)> = chain[..=s.seg].iter().rev().cloned().collect();
+        v.insert(0, proj);
+        v
+    } else {
+        let mut v: Vec<(f32, f32)> = chain[1..=s.seg].to_vec();
+        v.push(proj);
+        v
+    };
+    if !blockers.is_empty() {
+        pts.retain(|&(la, lo)| !blockers.iter().any(|b| b.hits(la, lo)));
+    }
+    pts
+}
+
 /// route along the walk/street graph through waypoints, keeping away from
-/// blockers. Each consecutive pair is a radius-bounded dijkstra; contracted
-/// edge geometry is included in the result. None when any leg fails.
+/// blockers. Each waypoint is projected onto the nearest road edge; the
+/// result runs along road geometry between those projections — the raw
+/// coordinates are never spliced in (off-road GTFS stops used to draw darts
+/// off the road, and crossing darts at junctions drew X shapes).
+/// Each consecutive pair is a radius-bounded dijkstra; None when a leg fails.
 pub fn route_waypoints(
     graph: &WalkGraph,
     waypoints: &[(f32, f32)],
@@ -606,32 +780,110 @@ pub fn route_waypoints(
     if waypoints.len() < 2 || graph.nodes.is_empty() {
         return None;
     }
-    let mut out: Vec<(f32, f32)> = vec![waypoints[0]];
-    for w in waypoints.windows(2) {
-        let (lat1, lon1) = w[0];
-        let (lat2, lon2) = w[1];
-        let start = nearest_node(graph, lat1, lon1)?;
-        let end = nearest_node(graph, lat2, lon2)?;
+    let mut snaps: Vec<WaypointSnap> = Vec::with_capacity(waypoints.len());
+    for &(la, lo) in waypoints {
+        match snap_waypoint(graph, la, lo) {
+            Some(s) => snaps.push(s),
+            None => {
+                // far off-grid: fall back to the nearest node
+                let node = nearest_node(graph, la, lo)?;
+                let n = &graph.nodes[node as usize];
+                snaps.push(WaypointSnap {
+                    lat: n.lat,
+                    lon: n.lon,
+                    dist_m: 0.0,
+                    node,
+                    edge_other: u32::MAX,
+                    chain: vec![(n.lat, n.lon)],
+                    seg: 0,
+                });
+            }
+        }
+    }
+
+    let same_edge = |a: &WaypointSnap, b: &WaypointSnap| {
+        a.edge_other != u32::MAX
+            && b.edge_other != u32::MAX
+            && a.node.min(a.edge_other) == b.node.min(b.edge_other)
+            && a.node.max(a.edge_other) == b.node.max(b.edge_other)
+    };
+
+    let mut out: Vec<(f32, f32)> = vec![(snaps[0].lat, snaps[0].lon)];
+    for w in snaps.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+
+        // both projections on the same edge: walk the chain between them
+        if same_edge(a, b) {
+            let mut chain = edge_chain(graph, a.node, a.edge_other);
+            let mut ia = a.seg;
+            let ib;
+            if a.node > a.edge_other {
+                // canonical chain now runs a.edge_other → a.node
+                chain.reverse();
+                ia = chain.len() - 1 - a.seg;
+                ib = if b.node == a.edge_other {
+                    b.seg
+                } else {
+                    chain.len() - 1 - b.seg
+                };
+            } else {
+                ib = if b.node == a.node {
+                    b.seg
+                } else {
+                    chain.len() - 1 - b.seg
+                };
+            }
+            if ia <= ib {
+                for pt in chain.iter().take(ib + 1).skip(ia + 1) {
+                    match out.last() {
+                        Some(last) if haversine(last.0, last.1, pt.0, pt.1) < 0.5 => {}
+                        _ => out.push(*pt),
+                    }
+                }
+            } else {
+                for pt in chain.iter().take(ia + 1).skip(ib + 1).rev() {
+                    match out.last() {
+                        Some(last) if haversine(last.0, last.1, pt.0, pt.1) < 0.5 => {}
+                        _ => out.push(*pt),
+                    }
+                }
+            }
+            let last_pt = (b.lat, b.lon);
+            match out.last() {
+                Some(last) if haversine(last.0, last.1, last_pt.0, last_pt.1) < 0.5 => {}
+                _ => out.push(last_pt),
+            }
+            continue;
+        }
+
+        // deadhead along road geometry: a.proj → a.node
+        for pt in partial_points(graph, a, true, blockers) {
+            match out.last() {
+                Some(last) if haversine(last.0, last.1, pt.0, pt.1) < 0.5 => {}
+                _ => out.push(pt),
+            }
+        }
         // graph detours run ~1.3–1.5× haversine — search wider
         let search = max_leg_m.saturating_add(max_leg_m / 2).min(40_000);
         let dijk = if blockers.is_empty() {
-            dijkstra(graph, start, search, DEFAULT_WALK_SPEED_MPS)
+            dijkstra(graph, a.node, search, DEFAULT_WALK_SPEED_MPS)
         } else {
-            dijkstra_avoiding(graph, start, search, DEFAULT_WALK_SPEED_MPS, blockers)
+            dijkstra_avoiding(graph, a.node, search, DEFAULT_WALK_SPEED_MPS, blockers)
         };
-        if dijk.dist[end as usize] == u32::MAX {
+        if dijk.dist[b.node as usize] == u32::MAX {
             return None;
         }
-        let mut coords = dijk.path_coords(graph, end);
-        if coords.is_empty() {
-            return None;
-        }
-        coords.insert(0, (lat1, lon1));
-        coords.push((lat2, lon2));
-        for c in coords {
+        for pt in dijk.path_coords(graph, b.node) {
             match out.last() {
-                Some(last) if haversine(last.0, last.1, c.0, c.1) < 0.5 => continue,
-                _ => out.push(c),
+                Some(last) if haversine(last.0, last.1, pt.0, pt.1) < 0.5 => {}
+                _ => out.push(pt),
+            }
+        }
+        // deadhead: b.node → b.proj
+        for pt in partial_points(graph, b, false, blockers) {
+            match out.last() {
+                Some(last) if haversine(last.0, last.1, pt.0, pt.1) < 0.5 => {}
+                _ => out.push(pt),
             }
         }
     }
@@ -705,6 +957,35 @@ mod road_tests {
         let path = route_waypoints(&g, &[(22.300, 114.160), (22.300, 114.170)], &[], 4000)
             .expect("A to C should route");
         assert!(path.len() >= 3);
+    }
+
+    #[test]
+    fn route_projects_off_road_waypoints_onto_roads() {
+        let g = build_graph();
+        // ~55 m south of the A-B road, mid-block: the line must stay on the
+        // road — the raw coordinate is never spliced in (OSRM-style)
+        let wp = (22.2995, 114.165);
+        let path = route_waypoints(&g, &[(22.300, 114.160), wp, (22.300, 114.170)], &[], 4000)
+            .expect("should route through the off-road waypoint");
+        assert!(
+            path.iter().all(|&(la, lo)| haversine(la, lo, wp.0, wp.1) > 30.0),
+            "path must not dart to the raw waypoint coordinate"
+        );
+        assert!(
+            path.iter().all(|&(la, _)| (la - 22.300).abs() < 0.0002),
+            "path must stay on the road, got {:?}",
+            path
+        );
+        // consecutive waypoints on the same road edge: splice along the road
+        let wp2 = (22.2996, 114.167);
+        let path2 =
+            route_waypoints(&g, &[wp, wp2], &[], 4000).expect("same-edge pair should route");
+        assert!(path2.len() >= 2);
+        assert!(
+            path2.iter().all(|&(la, _)| (la - 22.300).abs() < 0.0002),
+            "same-edge splice must stay on the road, got {:?}",
+            path2
+        );
     }
 
     #[test]
