@@ -130,6 +130,7 @@ fn load_osm_xml(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
     let mut way_highway: Option<String> = None;
     let mut way_foot_no = false;
     let mut way_access_private = false;
+    let mut way_service_aisle = false;
     let mut way_oneway: i8 = 0;
     let mut way_motor_no = false;
 
@@ -171,6 +172,7 @@ fn load_osm_xml(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                     way_highway = None;
                     way_foot_no = false;
                     way_access_private = false;
+                    way_service_aisle = false;
                     way_oneway = 0;
                     way_motor_no = false;
                 }
@@ -205,6 +207,12 @@ fn load_osm_xml(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                         way_foot_no = true;
                     } else if k == "access" && v == "private" {
                         way_access_private = true;
+                    } else if k == "service"
+                        && (v == "parking_aisle" || v == "driveway")
+                    {
+                        // Private car park aisles / driveways: buses never
+                        // run along them, and Dijkstra loves their shortcuts
+                        way_service_aisle = true;
                     } else if k == "oneway" {
                         way_oneway = match v.as_str() {
                             "yes" | "1" | "true" => 1,
@@ -229,8 +237,10 @@ fn load_osm_xml(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                         // every motorway from the road graph.
                         let walk_ok =
                             is_walkable(&hw) && !way_foot_no && !way_access_private;
-                        let is_vehicle =
-                            is_vehicle_class(&hw) && !way_motor_no && !way_access_private;
+                        let is_vehicle = is_vehicle_class(&hw)
+                            && !way_motor_no
+                            && !way_access_private
+                            && !way_service_aisle;
                         if walk_ok || is_vehicle {
                             let is_ped = is_pedestrian_priority(&hw);
                             let penalty = if is_ped { 1 } else { ROAD_PENALTY };
@@ -282,6 +292,7 @@ fn load_osm_pbf(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                 let mut motor_no = false;
                 let mut foot_no = false;
                 let mut access_private = false;
+                let mut service_aisle = false;
                 for (k, v) in w.tags() {
                     match k {
                         "highway" => hw = Some(v.to_string()),
@@ -296,13 +307,20 @@ fn load_osm_pbf(path: &Path) -> Result<(HashMap<i64, (f32, f32)>, Vec<WalkWay>)>
                         "motor_vehicle" if v == "no" => motor_no = true,
                         "foot" if v == "no" => foot_no = true,
                         "access" if v == "private" => access_private = true,
+                        "service" if v == "parking_aisle" || v == "driveway" => {
+                            // Private car park aisles / driveways: buses
+                            // never run along them
+                            service_aisle = true;
+                        }
                         _ => {}
                     }
                 }
                 let hw = hw.as_deref().unwrap_or("");
                 let walk_ok = is_walkable(hw) && !foot_no && !access_private;
-                let is_vehicle =
-                    is_vehicle_class(hw) && !motor_no && !access_private;
+                let is_vehicle = is_vehicle_class(hw)
+                    && !motor_no
+                    && !access_private
+                    && !service_aisle;
                 if !walk_ok && !is_vehicle {
                     return;
                 }
