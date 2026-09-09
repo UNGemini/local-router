@@ -632,7 +632,11 @@ struct WaypointSnap {
     seg: usize,
 }
 
-const WAYPOINT_SNAP_MAX_M: f32 = 120.0;
+/// Snap radius for route waypoints. OSRM-grade discipline: a waypoint that
+/// sits farther than this from any road is rejected (the caller falls back)
+/// rather than silently snapping onto a parallel/stub road — a wrong-road
+/// anchor poisons the whole leg, while a failed leg only costs a fallback.
+const WAYPOINT_SNAP_MAX_M: f32 = 60.0;
 
 /// project a waypoint onto the nearest road edge — like `snap_to_graph`
 /// but keeping the edge endpoints and segment index for splicing
@@ -784,20 +788,9 @@ pub fn route_waypoints(
     for &(la, lo) in waypoints {
         match snap_waypoint(graph, la, lo) {
             Some(s) => snaps.push(s),
-            None => {
-                // far off-grid: fall back to the nearest node
-                let node = nearest_node(graph, la, lo)?;
-                let n = &graph.nodes[node as usize];
-                snaps.push(WaypointSnap {
-                    lat: n.lat,
-                    lon: n.lon,
-                    dist_m: 0.0,
-                    node,
-                    edge_other: u32::MAX,
-                    chain: vec![(n.lat, n.lon)],
-                    seg: 0,
-                });
-            }
+            // Waypoint far off-grid: fail this route so the caller falls
+            // back (OSRM / GTFS) instead of anchoring onto a wrong road
+            None => return None,
         }
     }
 
